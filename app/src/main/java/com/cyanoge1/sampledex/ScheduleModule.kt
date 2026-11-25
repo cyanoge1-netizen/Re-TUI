@@ -487,6 +487,11 @@ object NoticeParser {
         }
         header.addView(btnRefresh)
 
+        val btnId = createHeaderButton(ctx, "ID", Theme.WARN) {
+            showProfileConfigDialog(ctx)
+        }
+        header.addView(btnId)
+
         val btnClose = createHeaderButton(ctx, "✕", Theme.ERR) {
             host.closeModule()
         }
@@ -874,6 +879,43 @@ object NoticeParser {
                 chipRow.addView(createChipView(ctx, "[$roomLabel]", roomCol))
             }
             card.addView(chipRow)
+
+            // Student Record Section (if personal marksheet/row matched from PDF)
+            val recordObj = m.optJSONObject("student_record")
+            if (recordObj != null) {
+                val rSummary = recordObj.optString("summary", "")
+                val rKey = recordObj.optString("matched_key", "")
+                if (rSummary.isNotEmpty()) {
+                    val recordBox = LinearLayout(ctx).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setBackgroundColor(Theme.CARD_DIM)
+                        setPadding(dp(ctx, 8), dp(ctx, 6), dp(ctx, 8), dp(ctx, 6))
+                        background = Theme.borderDrawable(Theme.CARD_DIM, Theme.OK, borderWidthPx = 2)
+                        val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                            setMargins(0, dp(ctx, 3), 0, dp(ctx, 5))
+                        }
+                        layoutParams = lp
+                    }
+
+                    val lblHeader = TextView(ctx).apply {
+                        text = "STUDENT RECORD [REG: $rKey]"
+                        setTextColor(Theme.OK)
+                        textSize = 8.5f
+                        typeface = Typeface.MONOSPACE
+                        setPadding(0, 0, 0, dp(ctx, 2))
+                    }
+                    recordBox.addView(lblHeader)
+
+                    val lblSummary = TextView(ctx).apply {
+                        text = rSummary
+                        setTextColor(Theme.TEXT)
+                        textSize = 9.5f
+                        typeface = Typeface.MONOSPACE
+                    }
+                    recordBox.addView(lblSummary)
+                    card.addView(recordBox)
+                }
+            }
 
             // Attachment Section (if notice has a document or media attachment)
             val attachObj = m.optJSONObject("attachment")
@@ -1952,6 +1994,46 @@ object NoticeParser {
             setPadding(dp(ctx, 10), dp(ctx, 16), dp(ctx, 10), dp(ctx, 16))
         }
         mainScrollContent?.addView(tv)
+    }
+
+    private fun showProfileConfigDialog(ctx: Context) {
+        val f = File("/sdcard/Re-T-UI/dex-modules/schedule/profile.json")
+        var currentReg = "2025331543"
+        try {
+            if (f.isFile) currentReg = JSONObject(f.readText()).optString("registration_no", currentReg)
+        } catch (_: Throwable) {}
+
+        val input = EditText(ctx).apply {
+            hint = "Registration No (e.g. 2025331543)"
+            setText(currentReg)
+            setTextColor(Theme.TEXT)
+            setHintTextColor(Theme.DIM)
+            typeface = Typeface.MONOSPACE
+            textSize = 10f
+            setPadding(dp(ctx, 10), dp(ctx, 10), dp(ctx, 10), dp(ctx, 10))
+        }
+
+        AlertDialog.Builder(ctx)
+            .setTitle("Student ID (Registration No)")
+            .setView(input)
+            .setPositiveButton("Save") { _, _ ->
+                val newReg = input.text.toString().trim()
+                try {
+                    val json = JSONObject().apply {
+                        put("registration_no", newReg)
+                        put("roll_no", "")
+                        put("name", "Shuvo")
+                        put("batch", "19th")
+                    }
+                    atomicWriteText(f, json.toString(2))
+                    showToast(ctx, "ID saved. Re-scanning notices...")
+                    triggerBackgroundRefresh()
+                } catch (e: Throwable) {
+                    showToast(ctx, "Save failed: ${e.message}")
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun openAttachment(ctx: Context, path: String, mime: String) {
