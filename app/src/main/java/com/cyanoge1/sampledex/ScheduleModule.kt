@@ -10,6 +10,7 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.provider.AlarmClock
@@ -24,6 +25,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import ohi.andre.consolelauncher.dex.RetuiDexHost
 import ohi.andre.consolelauncher.dex.RetuiDexModule
 import org.json.JSONArray
@@ -885,6 +887,75 @@ object NoticeParser {
                 chipRow.addView(createChipView(ctx, "[$roomLabel]", roomCol))
             }
             card.addView(chipRow)
+
+            // Attachment Section (if notice has a document or media attachment)
+            val attachObj = m.optJSONObject("attachment")
+            if (attachObj != null) {
+                val aName = attachObj.optString("name", "Document")
+                val aPath = attachObj.optString("path", "")
+                val aMime = attachObj.optString("mime_type", "application/octet-stream")
+                val aSizeStr = attachObj.optString("size_str", "")
+
+                val attachContainer = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setBackgroundColor(Theme.BTN)
+                    setPadding(dp(ctx, 8), dp(ctx, 6), dp(ctx, 8), dp(ctx, 6))
+                    val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(0, dp(ctx, 4), 0, dp(ctx, 6))
+                    }
+                    layoutParams = lp
+                }
+
+                val lblAttach = TextView(ctx).apply {
+                    val sizeTag = if (aSizeStr.isNotEmpty()) " ($aSizeStr)" else ""
+                    val isPdf = aMime.contains("pdf", ignoreCase = true) || aName.endsWith(".pdf", ignoreCase = true)
+                    val icon = if (isPdf) "📄 [PDF]" else "📎 [MEDIA]"
+                    text = "$icon $aName$sizeTag"
+                    setTextColor(Theme.INFO)
+                    textSize = 9f
+                    typeface = Typeface.MONOSPACE
+                    setPadding(0, 0, 0, dp(ctx, 4))
+                }
+                attachContainer.addView(lblAttach)
+
+                val attachBtnRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+
+                val btnOpen = Button(ctx).apply {
+                    text = "[ OPEN ]"
+                    setTextColor(Theme.OK)
+                    setBackgroundColor(Theme.CARD)
+                    textSize = 8.5f
+                    typeface = Typeface.MONOSPACE
+                    minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+                    includeFontPadding = false
+                    setPadding(dp(ctx, 8), dp(ctx, 4), dp(ctx, 8), dp(ctx, 4))
+                    val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(0, 0, dp(ctx, 6), 0)
+                    }
+                    layoutParams = lp
+                    setOnClickListener {
+                        openAttachment(ctx, aPath, aMime)
+                    }
+                }
+                attachBtnRow.addView(btnOpen)
+
+                val btnSave = Button(ctx).apply {
+                    text = "[ SAVE TO DOWNLOADS ]"
+                    setTextColor(Theme.WARN)
+                    setBackgroundColor(Theme.CARD)
+                    textSize = 8.5f
+                    typeface = Typeface.MONOSPACE
+                    minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+                    includeFontPadding = false
+                    setPadding(dp(ctx, 8), dp(ctx, 4), dp(ctx, 8), dp(ctx, 4))
+                    setOnClickListener {
+                        saveAttachmentToDownloads(ctx, aPath, aName)
+                    }
+                }
+                attachBtnRow.addView(btnSave)
+                attachContainer.addView(attachBtnRow)
+                card.addView(attachContainer)
+            }
 
             // Action: [ REVIEW -> ] (Hidden if already scheduled)
             if (!isScheduled) {
@@ -1894,6 +1965,52 @@ object NoticeParser {
             setPadding(dp(ctx, 10), dp(ctx, 16), dp(ctx, 10), dp(ctx, 16))
         }
         mainScrollContent?.addView(tv)
+    }
+
+    private fun openAttachment(ctx: Context, path: String, mime: String) {
+        val f = File(path)
+        if (!f.exists()) {
+            showToast(ctx, "File not found or deleted from storage.")
+            return
+        }
+        try {
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(Uri.fromFile(f), mime)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            ctx.startActivity(intent)
+        } catch (_: Throwable) {
+            val safePath = path.replace("'", "'\\''")
+            hostRef?.executeCommand("termux -run am start -a android.intent.action.VIEW -d 'file://$safePath' -t '$mime'")
+        }
+    }
+
+    private fun saveAttachmentToDownloads(ctx: Context, path: String, name: String) {
+        val src = File(path)
+        if (!src.exists()) {
+            showToast(ctx, "Source file not found on storage.")
+            return
+        }
+        try {
+            val dlDir = File("/sdcard/Download")
+            if (!dlDir.exists()) dlDir.mkdirs()
+            val dest = File(dlDir, name)
+            src.copyTo(dest, overwrite = true)
+            showToast(ctx, "Saved to /sdcard/Download/$name")
+            try {
+                val scanIntent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.fromFile(dest))
+                ctx.sendBroadcast(scanIntent)
+            } catch (_: Throwable) {}
+        } catch (e: Throwable) {
+            showToast(ctx, "Error saving: ${e.message}")
+        }
+    }
+
+    private fun showToast(ctx: Context, msg: String) {
+        mainHandler.post {
+            Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onDestroy() {
