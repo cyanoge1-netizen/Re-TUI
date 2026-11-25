@@ -564,25 +564,12 @@ object NoticeParser {
         reviewFormCard = buildReviewFormView(ctx)
         root.addView(reviewFormCard)
 
-        // --- 6. Scrollable Content Area ---
-        val scrollView = ScrollView(ctx).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(ctx, 360)
-            )
-            isNestedScrollingEnabled = true
-            setOnTouchListener { v, event ->
-                v.parent?.requestDisallowInterceptTouchEvent(true)
-                false
-            }
-            setBackgroundColor(Theme.BG)
-        }
+        // --- 6. Content Area (rendered directly in parent scroll view) ---
         mainScrollContent = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 0, 0, dp(ctx, 80))
         }
-        scrollView.addView(mainScrollContent)
-        root.addView(scrollView)
+        root.addView(mainScrollContent)
 
         // Auto-refresh if data is older than 15 mins
         checkAutoRefresh()
@@ -1974,6 +1961,13 @@ object NoticeParser {
             return
         }
         try {
+            try {
+                val m = android.os.StrictMode::class.java.getMethod("disableDeathOnFileUriExposure")
+                m.invoke(null)
+            } catch (_: Throwable) {
+                android.os.StrictMode.setVmPolicy(android.os.StrictMode.VmPolicy.Builder().build())
+            }
+
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(Uri.fromFile(f), mime)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -1982,7 +1976,7 @@ object NoticeParser {
             ctx.startActivity(intent)
         } catch (_: Throwable) {
             val safePath = path.replace("'", "'\\''")
-            hostRef?.executeCommand("termux -run am start -a android.intent.action.VIEW -d 'file://$safePath' -t '$mime'")
+            hostRef?.executeCommand("termux -run ~/retui/open_file.sh '$safePath' '$mime'")
         }
     }
 
