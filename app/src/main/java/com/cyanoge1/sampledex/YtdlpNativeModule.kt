@@ -119,7 +119,7 @@ class YtdlpNativeModule : RetuiDexModule {
                     if (!clip.isNullOrEmpty()) {
                         inputUrl?.setText(clip)
                     }
-                } catch (_: Throwable) {}
+                } catch (e: Throwable) {}
             }
         }
         urlRow.addView(btnPaste)
@@ -132,7 +132,7 @@ class YtdlpNativeModule : RetuiDexModule {
         }
 
         val formats = listOf("1080p" to "1080p", "720p" to "720p", "mp3" to "MP3", "best" to "BEST")
-        for ((key, label) to formats) {
+        for ((key, label) in formats) {
             val b = Button(ctx).apply {
                 text = label
                 textSize = 10f
@@ -262,7 +262,7 @@ class YtdlpNativeModule : RetuiDexModule {
                 put("log", "Starting yt-dlp...")
             }
             stateFile().writeText(initJson.toString(2))
-        } catch (_: Throwable) {}
+        } catch (e: Throwable) {}
 
         lblStatus?.text = "STATE: DL | Initializing..."
         pbar?.progress = 0
@@ -305,7 +305,7 @@ class YtdlpNativeModule : RetuiDexModule {
             if (state == "DONE" || state == "ERR" || state == "CANCELLED") {
                 isPolling = false
             }
-        } catch (_: Throwable) {}
+        } catch (e: Throwable) {}
     }
 
     override fun onDestroy() {
