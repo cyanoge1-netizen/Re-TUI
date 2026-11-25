@@ -31,3 +31,5 @@
 -dontwarn org.jdom2.**
 -dontwarn org.jsoup.**
 -dontwarn com.google.re2j.**
+
+-keep class ohi.andre.consolelauncher.dex.** { *; }

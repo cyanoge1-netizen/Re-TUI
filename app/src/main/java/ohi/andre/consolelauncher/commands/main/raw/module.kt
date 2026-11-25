@@ -66,6 +66,13 @@ class module : CommandAbstraction {
             return pack.context.getString(R.string.module_library_loading)
         }
 
+        if ("-dex-scan" == option) {
+            val found = ohi.andre.consolelauncher.managers.dex.DexModuleManager.scanAndRegister(pack.context)
+            send(pack, "rebuild", null)
+            return if (found.isEmpty()) "No DEX modules found in dex-modules/"
+            else "Registered DEX modules: ${found.joinToString(", ")}"
+        }
+
         if ("-new" == option || "-create" == option) {
             return createLuaModule(pack, input)
         }

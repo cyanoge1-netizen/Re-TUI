@@ -118,6 +118,7 @@ import ohi.andre.consolelauncher.managers.modules.home.CalendarModule
 import ohi.andre.consolelauncher.managers.modules.home.HomeModuleEvent
 import ohi.andre.consolelauncher.managers.modules.home.HomeModuleHost
 import ohi.andre.consolelauncher.managers.modules.home.HomeModules
+import ohi.andre.consolelauncher.managers.modules.home.DexModules
 import ohi.andre.consolelauncher.managers.modules.home.LuaModules
 import ohi.andre.consolelauncher.managers.modules.home.MusicModule
 import ohi.andre.consolelauncher.managers.modules.home.NotesModule
@@ -2350,6 +2351,7 @@ class UIManager(
         }
 
         luaModules.ensureSystemLuaModules()
+        ohi.andre.consolelauncher.managers.dex.DexModuleManager.scanAndRegister(mContext)
         activeModule = ""
         ModuleManager.setActiveModule(mContext, "")
         homeModulesContainer!!.removeAllViews()
@@ -2848,6 +2850,7 @@ class UIManager(
     }
 
     private val luaModules: LuaModules by lazy { LuaModules(moduleHost) { value -> actionLuaApp(value) } }
+    private val dexModules: DexModules by lazy { DexModules(moduleHost) }
 
     private val notificationsModule by lazy {
         NotificationsModule(moduleHost) { notifications ->
@@ -2902,6 +2905,8 @@ class UIManager(
 
         val builtIn = homeModules[id]
         if (luaModules.showLuaModuleIfSource(id)) {
+            // Rendered above.
+        } else if (dexModules.showDexModuleIfSource(id)) {
             // Rendered above.
         } else if (builtIn != null) {
             builtIn.show(moduleHost)

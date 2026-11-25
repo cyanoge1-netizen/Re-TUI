@@ -38,6 +38,7 @@ object ModuleManager {
     const val SOURCE_LAUNCHER_PREFIX: String = "launcher:"
     const val SOURCE_TERMUX_PREFIX: String = "termux:"
     const val SOURCE_LUA_PREFIX: String = "lua:"
+    const val SOURCE_DEX_PREFIX: String = "dex:"
 
     private const val PREFS = "retui_modules"
     private const val KEY_DOCK = "dock"
@@ -319,11 +320,24 @@ object ModuleManager {
     }
 
     fun isTermuxSource(source: String?): Boolean {
-        return !TextUtils.isEmpty(source) && !isLauncherSource(source) && !isLuaSource(source)
+        return !TextUtils.isEmpty(source) && !isLauncherSource(source) && !isLuaSource(source) && !isDexSource(source)
     }
 
     fun isLuaSource(source: String?): Boolean {
         return source != null && source.trim { it <= ' ' }.lowercase().startsWith(SOURCE_LUA_PREFIX)
+    }
+
+    fun isDexSource(source: String?): Boolean {
+        return source != null && source.trim { it <= ' ' }.lowercase().startsWith(SOURCE_DEX_PREFIX)
+    }
+
+    fun dexModuleId(source: String?): String {
+        if (!isDexSource(source)) {
+            return ""
+        }
+        return ohi.andre.consolelauncher.managers.dex.DexModuleManager.normalizeId(
+            source!!.trim { it <= ' ' }.substring(SOURCE_DEX_PREFIX.length)
+        )
     }
 
     fun luaWidgetId(source: String?): String {
@@ -409,6 +423,10 @@ object ModuleManager {
         val source = getModuleSource(context, id)
         if (isLuaSource(source)) {
             return LuaWidgetManager.getName(luaWidgetId(source))
+        }
+        if (isDexSource(source)) {
+            return ohi.andre.consolelauncher.managers.dex.DexModuleManager.getTitle(dexModuleId(source))
+                ?: displayName(context, id)
         }
         val title = getScriptTitle(context, id)
         if (!TextUtils.isEmpty(title)) {
