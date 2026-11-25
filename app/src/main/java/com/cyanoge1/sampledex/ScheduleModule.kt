@@ -36,9 +36,20 @@ import java.util.Locale
 import java.util.UUID
 
 /**
- * Design Tokens
+ * Production ScheduleModule with Cyberdeck monospace design, human manual approval gate,
+ * Next-Up 60s countdown ticker, conflict warning, and direct calendar/alarm integration.
  */
-object Theme {
+class ScheduleModule : RetuiDexModule {
+    override val id: String = "schedule"
+    override val title: String = "NOTICES // SCHEDULE"
+
+    enum class EventType { EXAM, CLASS, LAB, EVENT }
+
+
+    /**
+     * Design Tokens
+     */
+    object Theme {
     const val BG = 0xFF0A0A0F.toInt()
     const val CARD = 0xFF14131E.toInt()
     const val CARD_DIM = 0xFF0F0E17.toInt()
@@ -51,11 +62,11 @@ object Theme {
     const val WARN = 0xFFF1FA8C.toInt()
     const val ERR = 0xFFFF5555.toInt()
 
-    fun typeColor(type: ScheduleModule.EventType): Int = when (type) {
-        ScheduleModule.EventType.EXAM -> ERR
-        ScheduleModule.EventType.LAB -> INFO
-        ScheduleModule.EventType.CLASS -> OK
-        ScheduleModule.EventType.EVENT -> WARN
+    fun typeColor(type: EventType): Int = when (type) {
+        EventType.EXAM -> ERR
+        EventType.LAB -> INFO
+        EventType.CLASS -> OK
+        EventType.EVENT -> WARN
     }
 
     fun borderDrawable(bgColor: Int, borderColor: Int, borderWidthPx: Int = 3, cornerRadiusDp: Float = 0f): GradientDrawable {
@@ -74,7 +85,7 @@ object NoticeParser {
     enum class Confidence { SURE, GUESS, NONE }
 
     data class ParsedNotice(
-        val type: ScheduleModule.EventType,
+        val type: EventType,
         val typeConfidence: Confidence,
         val code: String,
         val codeConfidence: Confidence,
@@ -103,22 +114,22 @@ object NoticeParser {
 
         // 1. Guess Event Type
         val lower = norm.lowercase(Locale.ROOT)
-        var type = ScheduleModule.EventType.EVENT
+        var type = EventType.EVENT
         var typeConf = Confidence.NONE
 
         if (lower.contains("term test") || lower.contains("class test") || lower.contains(Regex("\\btt\\b")) ||
             lower.contains(Regex("\\bct\\b")) || lower.contains("quiz") || lower.contains("mid") ||
             lower.contains("final") || lower.contains("exam") || lower.contains("পরীক্ষা")
         ) {
-            type = ScheduleModule.EventType.EXAM
+            type = EventType.EXAM
             typeConf = Confidence.SURE
         } else if (lower.contains("lab") || lower.contains("ল্যাব") || lower.contains("practical")) {
-            type = ScheduleModule.EventType.LAB
+            type = EventType.LAB
             typeConf = Confidence.SURE
         } else if (lower.contains("class") || lower.contains("shifted") || lower.contains("rescheduled") ||
             lower.contains("ক্লাস") || lower.contains("routine") || lower.contains("schedule")
         ) {
-            type = ScheduleModule.EventType.CLASS
+            type = EventType.CLASS
             typeConf = Confidence.SURE
         }
 
@@ -168,7 +179,7 @@ object NoticeParser {
         // 5. Title synthesis
         var title = ""
         var titleConf = Confidence.NONE
-        if (type == ScheduleModule.EventType.EXAM) {
+        if (type == EventType.EXAM) {
             title = when {
                 lower.contains("term test") || lower.contains(Regex("\\btt\\b")) -> "Term Test"
                 lower.contains("class test") || lower.contains(Regex("\\bct\\b")) -> "Class Test"
@@ -178,10 +189,10 @@ object NoticeParser {
                 else -> "Exam"
             }
             titleConf = Confidence.SURE
-        } else if (type == ScheduleModule.EventType.LAB) {
+        } else if (type == EventType.LAB) {
             title = if (lower.contains("report")) "Lab Report Deadline" else "Lab Session"
             titleConf = Confidence.GUESS
-        } else if (type == ScheduleModule.EventType.CLASS) {
+        } else if (type == EventType.CLASS) {
             title = if (lower.contains("shifted") || lower.contains("rescheduled")) "Shifted Class" else "Lecture"
             titleConf = Confidence.GUESS
         } else {
@@ -314,7 +325,7 @@ object NoticeParser {
         var passed = 0
         for ((idx, s) in samples.withIndex()) {
             val res = parse(s)
-            val ok = res.type != ScheduleModule.EventType.EVENT || idx == 7
+            val ok = res.type != EventType.EVENT || idx == 7
             if (ok) passed++
             sb.append("#$idx [${res.type}] Code='${res.code}' Title='${res.title}' Room='${res.room}' DateConf=${res.dateConfidence}\n")
         }
@@ -322,14 +333,6 @@ object NoticeParser {
         return sb.toString()
     }
 }
-
-/**
- * Production ScheduleModule with Cyberdeck monospace design, human manual approval gate,
- * Next-Up 60s countdown ticker, conflict warning, and direct calendar/alarm integration.
- */
-class ScheduleModule : RetuiDexModule {
-    override val id: String = "schedule"
-    override val title: String = "NOTICES // SCHEDULE"
 
     companion object {
         const val PATH_DIR = "/sdcard/Re-T-UI/dex-modules/schedule"
@@ -344,7 +347,6 @@ class ScheduleModule : RetuiDexModule {
         private const val TICK_INTERVAL_MS = 60_000L
     }
 
-    enum class EventType { EXAM, CLASS, LAB, EVENT }
     private enum class Tab { NOTICES, SCHEDULE, AGENDA }
 
     data class EventItem(

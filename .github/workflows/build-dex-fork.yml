@@ -59,7 +59,7 @@ jobs:
 
           # 3. Build ScheduleModule
           mkdir -p build/schedule-module
-          SCHEDULE_CLASSES=$(find app/build -name "*ScheduleModule*.class")
+          SCHEDULE_CLASSES=$(find app/build -type f \( -name "*ScheduleModule*.class" -o -name "*NoticeParser*.class" -o -name "*Theme*.class" \))
           $D8 --lib "$ANDROID_JAR" --output build/schedule-module $SCHEDULE_CLASSES
           mv build/schedule-module/classes.dex build/schedule-module/module.dex
           cat > build/schedule-module/manifest.json << 'EOF'
