@@ -28,12 +28,14 @@ jobs:
           echo "Using Android Jar: $ANDROID_JAR"
           
           mkdir -p build/sample-module
-          CLASS_DIR="app/build/tmp/kotlin-classes/fdroidDebug"
+          
+          CLASS_FILES=$(find app/build -name "*CyberSampleModule*.class")
+          echo "Found classes:"
+          echo "$CLASS_FILES"
           
           $D8 --lib "$ANDROID_JAR" \
-              --classpath "$CLASS_DIR" \
               --output build/sample-module \
-              $(find "$CLASS_DIR/com/cyanoge1/sampledex" -name "*.class")
+              $CLASS_FILES
           
           mv build/sample-module/classes.dex build/sample-module/module.dex
           
