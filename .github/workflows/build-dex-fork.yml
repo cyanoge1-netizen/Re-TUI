@@ -27,18 +27,11 @@ jobs:
           echo "Using D8: $D8"
           echo "Using Android Jar: $ANDROID_JAR"
           
+          # 1. Build CyberSample
           mkdir -p build/sample-module
-          
-          CLASS_FILES=$(find app/build -name "*CyberSampleModule*.class")
-          echo "Found classes:"
-          echo "$CLASS_FILES"
-          
-          $D8 --lib "$ANDROID_JAR" \
-              --output build/sample-module \
-              $CLASS_FILES
-          
+          SAMPLE_CLASSES=$(find app/build -name "*CyberSampleModule*.class")
+          $D8 --lib "$ANDROID_JAR" --output build/sample-module $SAMPLE_CLASSES
           mv build/sample-module/classes.dex build/sample-module/module.dex
-          
           cat > build/sample-module/manifest.json << 'EOF'
           {
             "id": "cybersample",
@@ -47,8 +40,22 @@ jobs:
             "dexFile": "module.dex"
           }
           EOF
-          
           cd build/sample-module && zip -r ../../cybersample-dex.zip * && cd ../..
+
+          # 2. Build YtdlpNativeModule
+          mkdir -p build/ytdlp-module
+          YTDLP_CLASSES=$(find app/build -name "*YtdlpNativeModule*.class")
+          $D8 --lib "$ANDROID_JAR" --output build/ytdlp-module $YTDLP_CLASSES
+          mv build/ytdlp-module/classes.dex build/ytdlp-module/module.dex
+          cat > build/ytdlp-module/manifest.json << 'EOF'
+          {
+            "id": "ytdlp",
+            "title": "YT-DLP // NATIVE",
+            "entryClass": "com.cyanoge1.sampledex.YtdlpNativeModule",
+            "dexFile": "module.dex"
+          }
+          EOF
+          cd build/ytdlp-module && zip -r ../../ytdlp-dex.zip * && cd ../..
 
       - uses: actions/upload-artifact@v4
         with:
@@ -59,3 +66,8 @@ jobs:
         with:
           name: cybersample-dex
           path: cybersample-dex.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ytdlp-dex
+          path: ytdlp-dex.zip
