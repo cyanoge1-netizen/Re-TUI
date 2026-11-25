@@ -317,7 +317,7 @@ class ScheduleModule : RetuiDexModule {
 
             for (i in 0 until msgs.length()) {
                 val m = msgs.getJSONObject(i)
-                val text = m.optString("text", "")
+                val msgBody = m.optString("text", "")
                 val timeStr = m.optString("time_str", "")
 
                 val card = LinearLayout(ctx).apply {
@@ -336,7 +336,7 @@ class ScheduleModule : RetuiDexModule {
                     setPadding(0, 0, 0, 4)
                 }
                 val lblMeta = TextView(ctx).apply {
-                    text = timeStr
+                    setText(timeStr)
                     setTextColor(Color.parseColor("#6272A4"))
                     textSize = 9f
                     typeface = Typeface.MONOSPACE
@@ -345,7 +345,7 @@ class ScheduleModule : RetuiDexModule {
                 cardHdr.addView(lblMeta)
 
                 val btnConvert = Button(ctx).apply {
-                    text = "REVIEW & SCHEDULE"
+                    setText("REVIEW & SCHEDULE")
                     setTextColor(Color.parseColor("#00E5FF"))
                     setBackgroundColor(Color.parseColor("#1E1D2D"))
                     textSize = 9f
@@ -353,12 +353,12 @@ class ScheduleModule : RetuiDexModule {
                     setPadding(8, 2, 8, 2)
                     setOnClickListener {
                         val detectedType = if (isOfficial) {
-                            if (text.contains("exam", true) || text.contains("test", true) || text.contains("tt", true)) EventType.EXAM else EventType.EVENT
+                            if (msgBody.contains("exam", true) || msgBody.contains("test", true) || msgBody.contains("tt", true)) EventType.EXAM else EventType.EVENT
                         } else {
-                            if (text.contains("lab", true)) EventType.LAB else EventType.CLASS
+                            if (msgBody.contains("lab", true)) EventType.LAB else EventType.CLASS
                         }
-                        val detectedCode = extractCourseCode(text)
-                        openEventForm(detectedType, detectedCode, text.take(45), "", text)
+                        val detectedCode = extractCourseCode(msgBody)
+                        openEventForm(detectedType, detectedCode, msgBody.take(45), "", msgBody)
                     }
                 }
                 cardHdr.addView(btnConvert)
@@ -366,7 +366,7 @@ class ScheduleModule : RetuiDexModule {
 
                 // Message Text
                 val lblMsg = TextView(ctx).apply {
-                    this.text = text
+                    setText(msgBody)
                     setTextColor(textCol)
                     textSize = 9.5f
                     typeface = Typeface.MONOSPACE
