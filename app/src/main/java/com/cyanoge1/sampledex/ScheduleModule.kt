@@ -1,15 +1,21 @@
 package com.cyanoge1.sampledex
 
+import android.app.AlertDialog
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.provider.AlarmClock
 import android.provider.CalendarContract
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -25,74 +31,416 @@ import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
 import java.util.Locale
+import java.util.UUID
 
 /**
- * Native Academic Schedule & WhatsApp Notice Hub for Re:T-UI.
- * Sits inside launcher dock with humane, sober, and serious cyberdeck styling.
- *
- * Features:
- * - Dual feed toggling: Official Notices vs Class Schedule groups
- * - Manual review & approval gate for converting notices into scheduled events
- * - Dynamic form fields tailored per event type (Exam, Class, Lab, Event)
- * - Native Android DatePickerDialog and TimePickerDialog
- * - Direct System Calendar & Alarm Clock integration
- * - Persistent Agenda database in /sdcard/Re-T-UI/dex-modules/schedule/events.json
+ * Design Tokens
+ */
+object Theme {
+    const val BG = 0xFF0A0A0F.toInt()
+    const val CARD = 0xFF14131E.toInt()
+    const val CARD_DIM = 0xFF0F0E17.toInt()
+    const val BTN = 0xFF1F1E2D.toInt()
+    const val BTN_HOVER = 0xFF2A283C.toInt()
+    const val DIM = 0xFF8E8CA0.toInt()
+    const val TEXT = 0xFFE0DEF4.toInt()
+    const val OK = 0xFF50FA7B.toInt()
+    const val INFO = 0xFF00E5FF.toInt()
+    const val WARN = 0xFFF1FA8C.toInt()
+    const val ERR = 0xFFFF5555.toInt()
+
+    fun typeColor(type: ScheduleModule.EventType): Int = when (type) {
+        ScheduleModule.EventType.EXAM -> ERR
+        ScheduleModule.EventType.LAB -> INFO
+        ScheduleModule.EventType.CLASS -> OK
+        ScheduleModule.EventType.EVENT -> WARN
+    }
+
+    fun borderDrawable(bgColor: Int, borderColor: Int, borderWidthPx: Int = 3, cornerRadiusDp: Float = 0f): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(bgColor)
+            setStroke(borderWidthPx, borderColor)
+            if (cornerRadiusDp > 0) cornerRadius = cornerRadiusDp
+        }
+    }
+}
+
+/**
+ * Pure Notice Parser with Bangla digit normalization and confidence scoring.
+ */
+object NoticeParser {
+    enum class Confidence { SURE, GUESS, NONE }
+
+    data class ParsedNotice(
+        val type: ScheduleModule.EventType,
+        val typeConfidence: Confidence,
+        val code: String,
+        val codeConfidence: Confidence,
+        val title: String,
+        val titleConfidence: Confidence,
+        val room: String,
+        val roomConfidence: Confidence,
+        val dateMillis: Long?,
+        val dateConfidence: Confidence,
+        val rawNotice: String
+    )
+
+    private val BANGLA_DIGITS = charArrayOf('০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯')
+
+    fun normalizeBanglaDigits(text: String): String {
+        val sb = StringBuilder(text.length)
+        for (ch in text) {
+            val idx = BANGLA_DIGITS.indexOf(ch)
+            if (idx >= 0) sb.append(idx) else sb.append(ch)
+        }
+        return sb.toString()
+    }
+
+    fun parse(raw: String, noticeTs: Long = System.currentTimeMillis()): ParsedNotice {
+        val norm = normalizeBanglaDigits(raw)
+
+        // 1. Guess Event Type
+        val lower = norm.lowercase(Locale.ROOT)
+        var type = ScheduleModule.EventType.EVENT
+        var typeConf = Confidence.NONE
+
+        if (lower.contains("term test") || lower.contains("class test") || lower.contains(Regex("\\btt\\b")) ||
+            lower.contains(Regex("\\bct\\b")) || lower.contains("quiz") || lower.contains("mid") ||
+            lower.contains("final") || lower.contains("exam") || lower.contains("পরীক্ষা")
+        ) {
+            type = ScheduleModule.EventType.EXAM
+            typeConf = Confidence.SURE
+        } else if (lower.contains("lab") || lower.contains("ল্যাব") || lower.contains("practical")) {
+            type = ScheduleModule.EventType.LAB
+            typeConf = Confidence.SURE
+        } else if (lower.contains("class") || lower.contains("shifted") || lower.contains("rescheduled") ||
+            lower.contains("ক্লাস") || lower.contains("routine") || lower.contains("schedule")
+        ) {
+            type = ScheduleModule.EventType.CLASS
+            typeConf = Confidence.SURE
+        }
+
+        // 2. Extract Course Code
+        // Supports formats: "CSE 0541 1143", "MAT 0541 1101", "EEE 0713 1110", "CSE1143", "CSE-311"
+        var code = ""
+        var codeConf = Confidence.NONE
+        val codeRegex = Regex("\\b([A-Z]{2,4})\\s*(?:[-_]?\\s*(\\d{4}|\\d{3}))(?:\\s+(\\d{4}))?\\b", RegexOption.IGNORE_CASE)
+        val codeMatch = codeRegex.find(norm)
+        if (codeMatch != null) {
+            val dept = codeMatch.groupValues[1].uppercase(Locale.ROOT)
+            val num1 = codeMatch.groupValues[2]
+            val num2 = codeMatch.groupValues[3]
+            code = if (num2.isNotEmpty()) "$dept $num1 $num2" else "$dept $num1"
+            codeConf = Confidence.SURE
+        }
+
+        // 3. Extract Room
+        var room = ""
+        var roomConf = Confidence.NONE
+        val roomRegex = Regex("\\b(?:room|r|room\\s*no\\.?|lab)\\s*[:#-]?\\s*([a-z0-9_-]+)\\b", RegexOption.IGNORE_CASE)
+        val rMatch = roomRegex.find(norm)
+        if (rMatch != null) {
+            room = rMatch.groupValues[1].uppercase(Locale.ROOT)
+            roomConf = Confidence.SURE
+        } else {
+            // Secondary guess: 3-digit standalone numbers like "305", "UB402"
+            val fallbackRoomRegex = Regex("\\b([A-Z]{0,2}\\d{3})\\b")
+            val fbMatch = fallbackRoomRegex.find(norm)
+            if (fbMatch != null && fbMatch.value != code) {
+                room = fbMatch.value
+                roomConf = Confidence.GUESS
+            }
+        }
+
+        // 4. Extract Date and Time
+        val baseCal = Calendar.getInstance().apply { timeInMillis = noticeTs }
+        var dateMillis: Long? = null
+        var dateConf = Confidence.NONE
+
+        val parsedDt = extractDateTime(norm, baseCal)
+        if (parsedDt != null) {
+            dateMillis = parsedDt.first
+            dateConf = parsedDt.second
+        }
+
+        // 5. Title synthesis
+        var title = ""
+        var titleConf = Confidence.NONE
+        if (type == ScheduleModule.EventType.EXAM) {
+            title = when {
+                lower.contains("term test") || lower.contains(Regex("\\btt\\b")) -> "Term Test"
+                lower.contains("class test") || lower.contains(Regex("\\bct\\b")) -> "Class Test"
+                lower.contains("final") -> "Final Exam"
+                lower.contains("mid") -> "Midterm Exam"
+                lower.contains("quiz") -> "Quiz"
+                else -> "Exam"
+            }
+            titleConf = Confidence.SURE
+        } else if (type == ScheduleModule.EventType.LAB) {
+            title = if (lower.contains("report")) "Lab Report Deadline" else "Lab Session"
+            titleConf = Confidence.GUESS
+        } else if (type == ScheduleModule.EventType.CLASS) {
+            title = if (lower.contains("shifted") || lower.contains("rescheduled")) "Shifted Class" else "Lecture"
+            titleConf = Confidence.GUESS
+        } else {
+            title = "Notice Event"
+            titleConf = Confidence.NONE
+        }
+
+        return ParsedNotice(
+            type = type,
+            typeConfidence = typeConf,
+            code = code,
+            codeConfidence = codeConf,
+            title = title,
+            titleConfidence = titleConf,
+            room = room,
+            roomConfidence = roomConf,
+            dateMillis = dateMillis,
+            dateConfidence = dateConf,
+            rawNotice = raw
+        )
+    }
+
+    private fun extractDateTime(text: String, baseCal: Calendar): Pair<Long, Confidence>? {
+        val now = Calendar.getInstance()
+        var targetCal: Calendar? = null
+        var conf = Confidence.NONE
+
+        val lower = text.lowercase(Locale.ROOT)
+
+        // Relative days
+        if (lower.contains("tomorrow") || lower.contains("আগামীকাল")) {
+            targetCal = (baseCal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, 1) }
+            conf = Confidence.SURE
+        } else if (lower.contains("today") || lower.contains("আজ")) {
+            targetCal = baseCal.clone() as Calendar
+            conf = Confidence.SURE
+        }
+
+        // Specific dates e.g. "02 Dec", "2 December", "02/12", "02-12-2026"
+        if (targetCal == null) {
+            val dateMonthRegex = Regex("\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\b", RegexOption.IGNORE_CASE)
+            val dmMatch = dateMonthRegex.find(text)
+            if (dmMatch != null) {
+                val day = dmMatch.groupValues[1].toIntOrNull() ?: 1
+                val monthStr = dmMatch.groupValues[2].lowercase(Locale.ROOT)
+                val month = when (monthStr) {
+                    "jan" -> 0; "feb" -> 1; "mar" -> 2; "apr" -> 3; "may" -> 4; "jun" -> 5
+                    "jul" -> 6; "aug" -> 7; "sep" -> 8; "oct" -> 9; "nov" -> 10; "dec" -> 11
+                    else -> 0
+                }
+                targetCal = Calendar.getInstance().apply {
+                    set(Calendar.MONTH, month)
+                    set(Calendar.DAY_OF_MONTH, day)
+                    // If month is in past compared to current year, push to next year
+                    if (before(now)) add(Calendar.YEAR, 1)
+                }
+                conf = Confidence.SURE
+            }
+        }
+
+        // Numeric dates: "25/11", "02-12-2026"
+        if (targetCal == null) {
+            val numDateRegex = Regex("\\b(\\d{1,2})[/-](\\d{1,2})(?:[/-](\\d{2,4}))?\\b")
+            val ndMatch = numDateRegex.find(text)
+            if (ndMatch != null) {
+                val day = ndMatch.groupValues[1].toIntOrNull() ?: 1
+                val month = (ndMatch.groupValues[2].toIntOrNull() ?: 1) - 1
+                val yr = ndMatch.groupValues[3].toIntOrNull()
+                targetCal = Calendar.getInstance().apply {
+                    if (yr != null) {
+                        set(Calendar.YEAR, if (yr < 100) 2000 + yr else yr)
+                    }
+                    set(Calendar.MONTH, month)
+                    set(Calendar.DAY_OF_MONTH, day)
+                    if (yr == null && before(now)) add(Calendar.YEAR, 1)
+                }
+                conf = Confidence.SURE
+            }
+        }
+
+        if (targetCal == null) {
+            targetCal = (baseCal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, 1) }
+            conf = Confidence.GUESS
+        }
+
+        // Extract Time: "10:30 AM", "10.30am", "5 PM", "14:00"
+        val timeRegex = Regex("\\b(\\d{1,2})(?:[:.](\\d{2}))?\\s*(am|pm)?\\b", RegexOption.IGNORE_CASE)
+        val tMatch = timeRegex.findAll(text).firstOrNull { m ->
+            m.groupValues[3].isNotEmpty() || m.groupValues[2].isNotEmpty()
+        }
+
+        if (tMatch != null) {
+            var hour = tMatch.groupValues[1].toIntOrNull() ?: 10
+            val min = tMatch.groupValues[2].toIntOrNull() ?: 0
+            val ampm = tMatch.groupValues[3].lowercase(Locale.ROOT)
+            if (ampm == "pm" && hour < 12) hour += 12
+            if (ampm == "am" && hour == 12) hour = 0
+
+            targetCal.set(Calendar.HOUR_OF_DAY, hour)
+            targetCal.set(Calendar.MINUTE, min)
+            targetCal.set(Calendar.SECOND, 0)
+            targetCal.set(Calendar.MILLISECOND, 0)
+        } else {
+            // Default 10:30 AM
+            targetCal.set(Calendar.HOUR_OF_DAY, 10)
+            targetCal.set(Calendar.MINUTE, 30)
+            targetCal.set(Calendar.SECOND, 0)
+            conf = Confidence.GUESS
+        }
+
+        return Pair(targetCal.timeInMillis, conf)
+    }
+
+    /**
+     * Self-test function verifying parser resilience against real samples.
+     */
+    fun runSelfTest(): String {
+        val samples = listOf(
+            "Term Test of CSE 0541 1143 will be held on 02 Dec at 10:30 AM in Room 305.",
+            "EEE lab report submission deadline: 28 Nov, 5 PM.",
+            "Physics class shifted to Room 210 on Sunday at 11.00 am.",
+            "আগামীকাল MAT 0541 1101 এর ক্লাস টেস্ট সকাল ১০:০০ টায় রুম ৩০৪ এ হবে।",
+            "২৫/১২ তারিখে CSE1143 Final Exam অনুষ্ঠিত হবে সকাল ১০ টায়।",
+            "Tomorrow 2:00 PM extra class in Lab 2 for CSE 0713 1110.",
+            "Notice: Quiz 1 of CSE 311 on Wednesday 10 AM in R-402.",
+            "General department meeting today at 4 PM in Auditorium."
+        )
+
+        val sb = StringBuilder("--- NoticeParser Self-Test ---\n")
+        var passed = 0
+        for ((idx, s) in samples.withIndex()) {
+            val res = parse(s)
+            val ok = res.type != ScheduleModule.EventType.EVENT || idx == 7
+            if (ok) passed++
+            sb.append("#$idx [${res.type}] Code='${res.code}' Title='${res.title}' Room='${res.room}' DateConf=${res.dateConfidence}\n")
+        }
+        sb.append("Result: $passed/${samples.size} passed.\n")
+        return sb.toString()
+    }
+}
+
+/**
+ * Production ScheduleModule with Cyberdeck monospace design, human manual approval gate,
+ * Next-Up 60s countdown ticker, conflict warning, and direct calendar/alarm integration.
  */
 class ScheduleModule : RetuiDexModule {
     override val id: String = "schedule"
     override val title: String = "NOTICES // SCHEDULE"
 
-    private var hostRef: RetuiDexHost? = null
-    private val handler = Handler(Looper.getMainLooper())
+    companion object {
+        const val PATH_DIR = "/sdcard/Re-T-UI/dex-modules/schedule"
+        const val PATH_NOTICES = "$PATH_DIR/notices.json"
+        const val PATH_EVENTS = "$PATH_DIR/events.json"
+        const val PATH_STATE = "$PATH_DIR/state.json"
 
-    private enum class Tab { OFFICIAL, SCHEDULE, AGENDA }
-    private var activeTab = Tab.OFFICIAL
+        // Configurable Semester Dates for the progress bar
+        const val SEMESTER_START = "2026-08-01"
+        const val SEMESTER_END = "2026-12-31"
 
-    private enum class EventType { EXAM, CLASS, LAB, EVENT }
-    private var selectedType = EventType.EXAM
-    private var selectedExamSubtype = "Class Test / TT"
-
-    // Form state
-    private var isFormVisible = false
-    private var pendingNoticeText: String = ""
-    private var eventCalendar = Calendar.getInstance().apply {
-        add(Calendar.DAY_OF_YEAR, 1)
-        set(Calendar.HOUR_OF_DAY, 10)
-        set(Calendar.MINUTE, 30)
-        set(Calendar.SECOND, 0)
+        private const val TICK_INTERVAL_MS = 60_000L
     }
-    private var alarmOffsetMinutes = 30
 
-    // UI references
+    enum class EventType { EXAM, CLASS, LAB, EVENT }
+    private enum class Tab { NOTICES, SCHEDULE, AGENDA }
+
+    data class EventItem(
+        val id: String = UUID.randomUUID().toString(),
+        val sourceNoticeId: Long = 0L,
+        val type: EventType,
+        val title: String,
+        val code: String,
+        val room: String,
+        val startMillis: Long,
+        val alarmOffsetMins: Int = 30,
+        val isWeeklyRepeat: Boolean = false,
+        val notes: String = ""
+    )
+
+    private var hostRef: RetuiDexHost? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var isDestroyed = false
+
+    // State
+    private var activeTab = Tab.NOTICES
+    private var lastSeenTs: Long = 0L
+    private val ignoredNoticeIds = HashSet<Long>()
+    private var searchQuery: String = ""
+    private var isArchivedExpanded = false
+
+    // Review Form State
+    private var editingEventId: String? = null
+    private var isFormOpen = false
+    private var formNoticeId: Long = 0L
+    private var formType = EventType.EXAM
+    private var formExamSubtype = "Class Test / TT"
+    private var formCalendar = Calendar.getInstance()
+    private var formAlarmOffset = 30
+    private var formWeeklyRepeat = false
+    private var formSourceText = ""
+
+    // Badges state
+    private var titleBadgeText = ""
+    private var codeBadgeText = ""
+    private var roomBadgeText = ""
+    private var dateBadgeText = ""
+
+    // UI Elements
     private var rootLayout: LinearLayout? = null
-    private var contentContainer: LinearLayout? = null
-    private var formCard: LinearLayout? = null
-    private var btnTabOfficial: Button? = null
-    private var btnTabSchedule: Button? = null
-    private var btnTabAgenda: Button? = null
+    private var nextUpContainer: LinearLayout? = null
+    private var tabNoticesBtn: Button? = null
+    private var tabScheduleBtn: Button? = null
+    private var tabAgendaBtn: Button? = null
+    private var lblUpdatedHeader: TextView? = null
+    private var searchInput: EditText? = null
+    private var mainScrollContent: LinearLayout? = null
+    private var reviewFormCard: LinearLayout? = null
 
     // Form inputs
-    private var inputTitle: EditText? = null
-    private var inputCode: EditText? = null
-    private var inputRoom: EditText? = null
-    private var btnDate: Button? = null
-    private var btnTime: Button? = null
-    private var lblNoticeQuote: TextView? = null
+    private var formInputTitle: EditText? = null
+    private var formInputCode: EditText? = null
+    private var formInputRoom: EditText? = null
+    private var formBtnDate: Button? = null
+    private var formBtnTime: Button? = null
+    private var formLblConflict: TextView? = null
+    private var formBtnRepeat: Button? = null
+    private var formExamSubtypeRow: LinearLayout? = null
 
-    private val typeButtons = HashMap<EventType, Button>()
-    private val examSubtypeButtons = HashMap<String, Button>()
-    private val alarmButtons = HashMap<Int, Button>()
+    // Badges labels
+    private var lblBadgeTitle: TextView? = null
+    private var lblBadgeCode: TextView? = null
+    private var lblBadgeRoom: TextView? = null
+    private var lblBadgeDate: TextView? = null
+
+    private val typeBtnMap = HashMap<EventType, Button>()
+    private val examSubtypeBtnMap = HashMap<String, Button>()
+    private val alarmBtnMap = HashMap<Int, Button>()
+
+    // 60-second ticker runnable
+    private val tickerRunnable = object : Runnable {
+        override fun run() {
+            if (isDestroyed) return
+            updateNextUpStrip()
+            if (activeTab == Tab.AGENDA) renderAgendaTab()
+            mainHandler.postDelayed(this, TICK_INTERVAL_MS)
+        }
+    }
 
     override fun createView(host: RetuiDexHost, container: ViewGroup): View {
         hostRef = host
+        isDestroyed = false
         val ctx = host.context
-        val accent = host.accentTextColor
-        val textCol = host.bodyTextColor
+
+        loadState()
+        ensureEventIds()
 
         val root = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(12, 10, 12, 12)
+            setBackgroundColor(Theme.BG)
+            setPadding(dp(ctx, 12), dp(ctx, 10), dp(ctx, 12), dp(ctx, 12))
         }
         rootLayout = root
 
@@ -100,140 +448,139 @@ class ScheduleModule : RetuiDexModule {
         val header = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, 8)
+            setPadding(0, 0, 0, dp(ctx, 6))
         }
-        val lblTitle = TextView(ctx).apply {
+        val titleText = TextView(ctx).apply {
             text = "NOTICES // AGENDA HUB"
-            setTextColor(accent)
+            setTextColor(host.accentTextColor)
             textSize = 12f
             typeface = Typeface.MONOSPACE
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
-        header.addView(lblTitle)
+        header.addView(titleText)
 
-        val btnNew = Button(ctx).apply {
-            text = "+ NEW"
-            setTextColor(Color.parseColor("#50FA7B"))
-            setBackgroundColor(Color.parseColor("#1F1E2D"))
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            setPadding(8, 4, 8, 4)
-            setOnClickListener {
-                openEventForm(EventType.CLASS, "", "New Event", "", "")
-            }
+        val btnNew = createHeaderButton(ctx, "+NEW", Theme.OK) {
+            val emptyNotice = NoticeParser.ParsedNotice(
+                type = EventType.CLASS,
+                typeConfidence = NoticeParser.Confidence.NONE,
+                code = "",
+                codeConfidence = NoticeParser.Confidence.NONE,
+                title = "",
+                titleConfidence = NoticeParser.Confidence.NONE,
+                room = "",
+                roomConfidence = NoticeParser.Confidence.NONE,
+                dateMillis = System.currentTimeMillis() + 86400000L,
+                dateConfidence = NoticeParser.Confidence.NONE,
+                rawNotice = ""
+            )
+            openReviewForm(emptyNotice, null)
         }
         header.addView(btnNew)
 
-        val btnRefresh = Button(ctx).apply {
-            text = "REFRESH"
-            setTextColor(Color.parseColor("#00E5FF"))
-            setBackgroundColor(Color.parseColor("#1F1E2D"))
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            setPadding(8, 4, 8, 4)
-            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                setMargins(4, 0, 0, 0)
-            }
-            layoutParams = lp
-            setOnClickListener {
-                host.executeCommand("termux -run ~/retui/wa_fetch.sh")
-                handler.postDelayed({ renderActiveTab() }, 900)
-            }
+        val btnRefresh = createHeaderButton(ctx, "REFRESH", Theme.INFO) {
+            triggerBackgroundRefresh()
         }
         header.addView(btnRefresh)
 
-        val btnClose = Button(ctx).apply {
-            text = "✕"
-            setTextColor(Color.parseColor("#FF5555"))
-            setBackgroundColor(Color.parseColor("#22FF5555"))
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            setPadding(8, 4, 8, 4)
-            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                setMargins(4, 0, 0, 0)
-            }
-            layoutParams = lp
-            setOnClickListener { host.closeModule() }
+        val btnClose = createHeaderButton(ctx, "✕", Theme.ERR) {
+            host.closeModule()
         }
         header.addView(btnClose)
         root.addView(header)
 
-        // --- 2. Segmented Navigation Tabs ---
+        // --- 2. Next Up Strip (Always visible countdown bar) ---
+        nextUpContainer = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Theme.CARD)
+            setPadding(dp(ctx, 10), dp(ctx, 6), dp(ctx, 10), dp(ctx, 6))
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 0, 0, dp(ctx, 8))
+            }
+            layoutParams = lp
+        }
+        root.addView(nextUpContainer)
+
+        // --- 3. Navigation Tabs & Unread Badge ---
         val tabRow = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 0, 0, 8)
+            setPadding(0, 0, 0, dp(ctx, 4))
         }
 
-        btnTabOfficial = Button(ctx).apply {
-            text = "NOTICES"
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(0, 0, 2, 0)
-            }
-            setOnClickListener {
-                activeTab = Tab.OFFICIAL
-                isFormVisible = false
-                refreshTabs(accent)
-                renderActiveTab()
-            }
+        tabNoticesBtn = createTabButton(ctx, "NOTICES", 1f) {
+            switchTab(Tab.NOTICES)
         }
-        tabRow.addView(btnTabOfficial)
+        tabRow.addView(tabNoticesBtn)
 
-        btnTabSchedule = Button(ctx).apply {
-            text = "CLASS FEED"
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.1f).apply {
-                setMargins(2, 0, 2, 0)
-            }
-            setOnClickListener {
-                activeTab = Tab.SCHEDULE
-                isFormVisible = false
-                refreshTabs(accent)
-                renderActiveTab()
-            }
+        tabScheduleBtn = createTabButton(ctx, "CLASS FEED", 1.1f) {
+            switchTab(Tab.SCHEDULE)
         }
-        tabRow.addView(btnTabSchedule)
+        tabRow.addView(tabScheduleBtn)
 
-        btnTabAgenda = Button(ctx).apply {
-            text = "AGENDA"
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.9f).apply {
-                setMargins(2, 0, 0, 0)
-            }
-            setOnClickListener {
-                activeTab = Tab.AGENDA
-                isFormVisible = false
-                refreshTabs(accent)
-                renderActiveTab()
-            }
+        tabAgendaBtn = createTabButton(ctx, "AGENDA", 1f) {
+            switchTab(Tab.AGENDA)
         }
-        tabRow.addView(btnTabAgenda)
+        tabRow.addView(tabAgendaBtn)
         root.addView(tabRow)
 
-        // --- 3. Dynamic Form Container (Review & Approve) ---
-        formCard = buildFormView(ctx, accent, textCol)
-        root.addView(formCard)
+        // Updated time line
+        lblUpdatedHeader = TextView(ctx).apply {
+            setTextColor(Theme.DIM)
+            textSize = 9f
+            typeface = Typeface.MONOSPACE
+            setPadding(dp(ctx, 2), 0, 0, dp(ctx, 4))
+        }
+        root.addView(lblUpdatedHeader)
 
-        // --- 4. Main Scrollable Content Container ---
+        // --- 4. Search Filter Box ---
+        searchInput = EditText(ctx).apply {
+            hint = "Filter notices / agenda..."
+            setTextColor(Theme.TEXT)
+            setHintTextColor(Theme.DIM)
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            setBackgroundColor(Theme.CARD)
+            setPadding(dp(ctx, 10), dp(ctx, 6), dp(ctx, 10), dp(ctx, 6))
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 0, 0, dp(ctx, 6))
+            }
+            layoutParams = lp
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    searchQuery = s?.toString()?.trim() ?: ""
+                    renderActiveView()
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            })
+        }
+        root.addView(searchInput)
+
+        // --- 5. Inline Review & Approval Form ---
+        reviewFormCard = buildReviewFormView(ctx)
+        root.addView(reviewFormCard)
+
+        // --- 6. Scrollable Content Area ---
         val scrollView = ScrollView(ctx).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(ctx, 210)
+                dp(ctx, 220)
             )
-            setBackgroundColor(Color.parseColor("#0E0D15"))
-            setPadding(8, 8, 8, 8)
+            setBackgroundColor(Theme.BG)
         }
-        contentContainer = LinearLayout(ctx).apply {
+        mainScrollContent = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
         }
-        scrollView.addView(contentContainer)
+        scrollView.addView(mainScrollContent)
         root.addView(scrollView)
 
-        refreshTabs(accent)
-        renderActiveTab()
+        // Auto-refresh if data is older than 15 mins
+        checkAutoRefresh()
+
+        // Start 60s ticker
+        mainHandler.post(tickerRunnable)
+
+        refreshTabsVisual()
+        renderActiveView()
 
         return root
     }
@@ -243,564 +590,1037 @@ class ScheduleModule : RetuiDexModule {
         return (v * d + 0.5f).toInt()
     }
 
-    private fun refreshTabs(accent: Int) {
-        val darkBg = Color.parseColor("#1F1E2D")
-        val mutedText = Color.parseColor("#8E8CA0")
-        val activeText = Color.parseColor("#0A0A0F")
+    private fun createHeaderButton(ctx: Context, text: String, color: Int, onClick: () -> Unit): Button {
+        return Button(ctx).apply {
+            this.text = text
+            setTextColor(color)
+            setBackgroundColor(Theme.BTN)
+            textSize = 9.5f
+            typeface = Typeface.MONOSPACE
+            setPadding(dp(ctx, 8), dp(ctx, 4), dp(ctx, 8), dp(ctx, 4))
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(dp(ctx, 3), 0, 0, 0)
+            }
+            layoutParams = lp
+            setOnClickListener { onClick() }
+        }
+    }
 
-        fun applyTab(btn: Button?, isActive: Boolean) {
+    private fun createTabButton(ctx: Context, label: String, weight: Float, onClick: () -> Unit): Button {
+        return Button(ctx).apply {
+            text = label
+            textSize = 9.5f
+            typeface = Typeface.MONOSPACE
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, weight).apply {
+                setMargins(dp(ctx, 2), 0, dp(ctx, 2), 0)
+            }
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private fun switchTab(tab: Tab) {
+        if (activeTab == Tab.NOTICES && tab != Tab.NOTICES) {
+            // Leaving NOTICES marks all seen
+            markAllNoticesSeen()
+        }
+        activeTab = tab
+        isFormOpen = false
+        reviewFormCard?.visibility = View.GONE
+        refreshTabsVisual()
+        renderActiveView()
+    }
+
+    private fun refreshTabsVisual() {
+        val unread = computeUnreadCount()
+        tabNoticesBtn?.text = if (unread > 0) "NOTICES ($unread)" else "NOTICES"
+        tabScheduleBtn?.text = "CLASS FEED"
+        tabAgendaBtn?.text = if (activeTab == Tab.AGENDA) "AGENDA*" else "AGENDA"
+
+        fun styleTab(btn: Button?, isActive: Boolean) {
             if (isActive) {
-                btn?.setBackgroundColor(accent)
-                btn?.setTextColor(activeText)
+                btn?.setBackgroundColor(Theme.INFO)
+                btn?.setTextColor(Theme.BG)
             } else {
-                btn?.setBackgroundColor(darkBg)
-                btn?.setTextColor(mutedText)
+                btn?.setBackgroundColor(Theme.BTN)
+                btn?.setTextColor(Theme.DIM)
             }
         }
 
-        applyTab(btnTabOfficial, activeTab == Tab.OFFICIAL)
-        applyTab(btnTabSchedule, activeTab == Tab.SCHEDULE)
-        applyTab(btnTabAgenda, activeTab == Tab.AGENDA)
-
-        // Update Agenda label with count
-        val count = loadEvents().length()
-        btnTabAgenda?.text = if (count > 0) "AGENDA ($count)" else "AGENDA"
+        styleTab(tabNoticesBtn, activeTab == Tab.NOTICES)
+        styleTab(tabScheduleBtn, activeTab == Tab.SCHEDULE)
+        styleTab(tabAgendaBtn, activeTab == Tab.AGENDA)
     }
 
-    private fun renderActiveTab() {
-        val ctx = hostRef?.context ?: return
-        val accent = hostRef?.accentTextColor ?: Color.CYAN
-        val textCol = hostRef?.bodyTextColor ?: Color.WHITE
+    private fun renderActiveView() {
+        updateUpdatedHeader()
+        updateNextUpStrip()
 
-        formCard?.visibility = if (isFormVisible) View.VISIBLE else View.GONE
-        contentContainer?.removeAllViews()
+        reviewFormCard?.visibility = if (isFormOpen) View.VISIBLE else View.GONE
+        mainScrollContent?.removeAllViews()
 
         when (activeTab) {
-            Tab.OFFICIAL -> renderNoticeFeed(ctx, accent, textCol, isOfficial = true)
-            Tab.SCHEDULE -> renderNoticeFeed(ctx, accent, textCol, isOfficial = false)
-            Tab.AGENDA -> renderAgendaList(ctx, accent, textCol)
+            Tab.NOTICES -> renderFeedTab(isOfficial = true)
+            Tab.SCHEDULE -> renderFeedTab(isOfficial = false)
+            Tab.AGENDA -> renderAgendaTab()
         }
     }
 
-    // --- NOTICE FEED RENDERING ---
-    private fun renderNoticeFeed(ctx: Context, accent: Int, textCol: Int, isOfficial: Boolean) {
-        val noticesFile = File("/sdcard/Re-T-UI/dex-modules/schedule/notices.json")
-        if (!noticesFile.isFile) {
-            val emptyMsg = TextView(ctx).apply {
-                text = "No notices synchronized yet.\nTap [REFRESH] to fetch from WhatsApp."
-                setTextColor(Color.parseColor("#6272A4"))
-                textSize = 10f
-                typeface = Typeface.MONOSPACE
-                setPadding(10, 16, 10, 16)
-            }
-            contentContainer?.addView(emptyMsg)
+    // --- NEXT UP STRIP WITH 60s COUNTDOWN TICKER ---
+    private fun updateNextUpStrip() {
+        val container = nextUpContainer ?: return
+        val ctx = hostRef?.context ?: return
+        container.removeAllViews()
+
+        val nextEvent = getNextUpcomingEvent()
+        if (nextEvent == null) {
+            container.visibility = View.GONE
+            return
+        }
+        container.visibility = View.VISIBLE
+
+        val typeColor = Theme.typeColor(nextEvent.type)
+        container.background = Theme.borderDrawable(Theme.CARD, typeColor, borderWidthPx = 4)
+
+        val row1 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        val lblTag = TextView(ctx).apply {
+            text = "▌NEXT UP · ${nextEvent.type.name}"
+            setTextColor(typeColor)
+            textSize = 9.5f
+            typeface = Typeface.MONOSPACE
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        row1.addView(lblTag)
+
+        val now = System.currentTimeMillis()
+        val diff = nextEvent.startMillis - now
+        val countdownStr = formatCountdown(diff)
+        val lblCountdown = TextView(ctx).apply {
+            text = countdownStr
+            setTextColor(if (nextEvent.type == EventType.EXAM && diff in 1..21_600_000L) Theme.ERR else Theme.DIM)
+            textSize = 9.5f
+            typeface = Typeface.MONOSPACE
+        }
+        row1.addView(lblCountdown)
+        container.addView(row1)
+
+        val lblTitle = TextView(ctx).apply {
+            val codePrefix = if (nextEvent.code.isNotEmpty()) "${nextEvent.code} · " else ""
+            text = "▌$codePrefix${nextEvent.title}"
+            setTextColor(Theme.TEXT)
+            textSize = 10.5f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, dp(ctx, 2), 0, dp(ctx, 2))
+        }
+        container.addView(lblTitle)
+
+        // Progress bar and date/room
+        val sdf = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault())
+        val dtStr = sdf.format(nextEvent.startMillis)
+        val roomStr = if (nextEvent.room.isNotEmpty()) " · ${nextEvent.room}" else ""
+        val asciiBar = getAsciiBar(diff)
+
+        val lblBar = TextView(ctx).apply {
+            text = "▌$asciiBar  $dtStr$roomStr"
+            setTextColor(Theme.INFO)
+            textSize = 9.5f
+            typeface = Typeface.MONOSPACE
+        }
+        container.addView(lblBar)
+    }
+
+    private fun formatCountdown(diffMillis: Long): String {
+        if (diffMillis <= 0) return "NOW"
+        val sec = diffMillis / 1000
+        val min = sec / 60
+        val hrs = min / 60
+        val days = hrs / 24
+
+        return when {
+            days > 0 -> "${days}d ${hrs % 24}h"
+            hrs > 0 -> "${hrs}h ${min % 60}m"
+            else -> "${min}m"
+        }
+    }
+
+    private fun getAsciiBar(diffMillis: Long): String {
+        // Full scale: 3 days (259_200_000 ms)
+        val total = 259_200_000.0
+        val fraction = (1.0 - (diffMillis / total)).coerceIn(0.0, 1.0)
+        val filled = (fraction * 10).toInt()
+        return "[" + "█".repeat(filled) + "░".repeat(10 - filled) + "]"
+    }
+
+    // --- NOTICES FEED RENDERING ---
+    private fun renderFeedTab(isOfficial: Boolean) {
+        val ctx = hostRef?.context ?: return
+        val noticesData = loadNoticesJson()
+        if (noticesData == null) {
+            showEmptyMessage("No notices synchronized yet. Tap REFRESH.")
             return
         }
 
-        try {
-            val json = JSONObject(noticesFile.readText())
-            val groupKey = if (isOfficial) "official_notices" else "class_schedule"
-            val groupObj = json.optJSONObject(groupKey)
-            val msgs = groupObj?.optJSONArray("messages") ?: JSONArray()
+        val groupKey = if (isOfficial) "official_notices" else "class_schedule"
+        val group = noticesData.optJSONObject(groupKey)
+        val msgs = group?.optJSONArray("messages") ?: JSONArray()
 
-            if (msgs.length() == 0) {
-                val emptyMsg = TextView(ctx).apply {
-                    text = "No messages found in this group."
-                    setTextColor(Color.parseColor("#6272A4"))
-                    textSize = 10f
-                    typeface = Typeface.MONOSPACE
-                    setPadding(10, 16, 10, 16)
-                }
-                contentContainer?.addView(emptyMsg)
-                return
-            }
-
-            for (i in 0 until msgs.length()) {
-                val m = msgs.getJSONObject(i)
-                val msgBody = m.optString("text", "")
-                val timeStr = m.optString("time_str", "")
-
-                val card = LinearLayout(ctx).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setBackgroundColor(Color.parseColor("#151420"))
-                    setPadding(10, 8, 10, 8)
-                    val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(0, 0, 0, 8)
-                    }
-                    layoutParams = lp
-                }
-
-                // Card Header Row
-                val cardHdr = LinearLayout(ctx).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    setPadding(0, 0, 0, 4)
-                }
-                val lblMeta = TextView(ctx).apply {
-                    setText(timeStr)
-                    setTextColor(Color.parseColor("#6272A4"))
-                    textSize = 9f
-                    typeface = Typeface.MONOSPACE
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                }
-                cardHdr.addView(lblMeta)
-
-                val btnConvert = Button(ctx).apply {
-                    setText("REVIEW & SCHEDULE")
-                    setTextColor(Color.parseColor("#00E5FF"))
-                    setBackgroundColor(Color.parseColor("#1E1D2D"))
-                    textSize = 9f
-                    typeface = Typeface.MONOSPACE
-                    setPadding(8, 2, 8, 2)
-                    setOnClickListener {
-                        val detectedType = if (isOfficial) {
-                            if (msgBody.contains("exam", true) || msgBody.contains("test", true) || msgBody.contains("tt", true)) EventType.EXAM else EventType.EVENT
-                        } else {
-                            if (msgBody.contains("lab", true)) EventType.LAB else EventType.CLASS
-                        }
-                        val detectedCode = extractCourseCode(msgBody)
-                        openEventForm(detectedType, detectedCode, msgBody.take(45), "", msgBody)
-                    }
-                }
-                cardHdr.addView(btnConvert)
-                card.addView(cardHdr)
-
-                // Message Text
-                val lblMsg = TextView(ctx).apply {
-                    setText(msgBody)
-                    setTextColor(textCol)
-                    textSize = 9.5f
-                    typeface = Typeface.MONOSPACE
-                }
-                card.addView(lblMsg)
-
-                contentContainer?.addView(card)
-            }
-        } catch (e: Throwable) {
-            val errView = TextView(ctx).apply {
-                text = "Error reading notices: ${e.message}"
-                setTextColor(Color.parseColor("#FF5555"))
-                textSize = 10f
-                typeface = Typeface.MONOSPACE
-            }
-            contentContainer?.addView(errView)
-        }
-    }
-
-    private fun extractCourseCode(text: String): String {
-        val re = Regex("\\b([A-Z]{2,4}\\s*[-_]?\\s*\\d{3})\\b", RegexOption.IGNORE_CASE)
-        val match = re.find(text)
-        return match?.value?.replace("\\s+".toRegex(), "")?.uppercase() ?: ""
-    }
-
-    // --- AGENDA LIST RENDERING ---
-    private fun renderAgendaList(ctx: Context, accent: Int, textCol: Int) {
-        val events = loadEvents()
-        if (events.length() == 0) {
-            val emptyMsg = TextView(ctx).apply {
-                text = "Agenda is empty.\nConvert a notice or tap [+ NEW] to schedule an event."
-                setTextColor(Color.parseColor("#6272A4"))
-                textSize = 10f
-                typeface = Typeface.MONOSPACE
-                setPadding(10, 16, 10, 16)
-            }
-            contentContainer?.addView(emptyMsg)
+        if (msgs.length() == 0) {
+            showEmptyMessage("No messages in this group.")
             return
         }
 
-        val sdf = SimpleDateFormat("EEE, MMM dd @ hh:mm a", Locale.getDefault())
+        val scheduledNoticeIds = getScheduledNoticeIds()
+        var renderedCount = 0
 
-        for (i in 0 until events.length()) {
-            val ev = events.getJSONObject(i)
-            val typeStr = ev.optString("type", "EVENT")
-            val title = ev.optString("title", "Untitled")
-            val code = ev.optString("code", "")
-            val room = ev.optString("room", "")
-            val startMillis = ev.optLong("start_millis", 0)
+        for (i in 0 until msgs.length()) {
+            val m = msgs.getJSONObject(i)
+            val nId = m.optLong("id", 0L)
+            if (ignoredNoticeIds.contains(nId)) continue
+
+            val rawText = m.optString("text", "").trim()
+            val ts = m.optLong("timestamp", 0L)
+            val timeStr = m.optString("time_str", "Recent")
+
+            if (searchQuery.isNotEmpty() && !rawText.contains(searchQuery, ignoreCase = true)) {
+                continue
+            }
+
+            renderedCount++
+            val isNew = ts > lastSeenTs
+            val isScheduled = scheduledNoticeIds.contains(nId)
+            val parsed = NoticeParser.parse(rawText, ts)
 
             val card = LinearLayout(ctx).apply {
                 orientation = LinearLayout.VERTICAL
-                setBackgroundColor(Color.parseColor("#151420"))
-                setPadding(10, 8, 10, 8)
+                setBackgroundColor(if (isScheduled) Theme.CARD_DIM else Theme.CARD)
+                setPadding(dp(ctx, 10), dp(ctx, 8), dp(ctx, 10), dp(ctx, 8))
+                val typeColor = Theme.typeColor(parsed.type)
+                background = Theme.borderDrawable(if (isScheduled) Theme.CARD_DIM else Theme.CARD, typeColor, borderWidthPx = 3)
                 val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                    setMargins(0, 0, 0, 8)
+                    setMargins(0, 0, 0, dp(ctx, 8))
                 }
                 layoutParams = lp
-            }
 
-            val row1 = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-            }
-            val lblTag = TextView(ctx).apply {
-                text = "[$typeStr]"
-                setTextColor(when (typeStr) {
-                    "EXAM" -> Color.parseColor("#FF5555")
-                    "CLASS" -> Color.parseColor("#50FA7B")
-                    "LAB" -> Color.parseColor("#F1FA8C")
-                    else -> Color.parseColor("#BD93F9")
-                })
-                textSize = 9.5f
-                typeface = Typeface.MONOSPACE
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            row1.addView(lblTag)
-
-            val btnDel = Button(ctx).apply {
-                text = "✕"
-                setTextColor(Color.parseColor("#FF5555"))
-                setBackgroundColor(Color.TRANSPARENT)
-                textSize = 10f
-                setPadding(6, 0, 6, 0)
-                setOnClickListener {
-                    deleteEvent(i)
-                    refreshTabs(accent)
-                    renderActiveTab()
+                setOnLongClickListener {
+                    showNoticeContextMenu(ctx, nId, rawText, parsed)
+                    true
                 }
             }
-            row1.addView(btnDel)
-            card.addView(row1)
 
-            val lblMain = TextView(ctx).apply {
-                val codePrefix = if (code.isNotEmpty()) "$code: " else ""
-                text = "$codePrefix$title"
-                setTextColor(textCol)
-                textSize = 10.5f
+            // Top Status Line: ● NEW / ✓ SCHEDULED + Timestamp
+            val topRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+            val lblMarker = TextView(ctx).apply {
+                textSize = 9f
+                typeface = Typeface.MONOSPACE
+                when {
+                    isScheduled -> {
+                        text = "✓ SCHEDULED"
+                        setTextColor(Theme.DIM)
+                    }
+                    isNew -> {
+                        text = "● NEW"
+                        setTextColor(Theme.OK)
+                    }
+                    else -> text = ""
+                }
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            topRow.addView(lblMarker)
+
+            val lblTime = TextView(ctx).apply {
+                text = timeStr
+                setTextColor(Theme.DIM)
+                textSize = 8.5f
                 typeface = Typeface.MONOSPACE
             }
-            card.addView(lblMain)
+            topRow.addView(lblTime)
+            card.addView(topRow)
 
-            val lblTimeLoc = TextView(ctx).apply {
-                val dtStr = if (startMillis > 0) sdf.format(startMillis) else "--"
-                val roomStr = if (room.isNotEmpty()) " | Room: $room" else ""
-                text = "$dtStr$roomStr"
-                setTextColor(Color.parseColor("#00E5FF"))
+            // Notice Body
+            val lblBody = TextView(ctx).apply {
+                text = rawText
+                setTextColor(if (isScheduled) Theme.DIM else Theme.TEXT)
                 textSize = 9.5f
                 typeface = Typeface.MONOSPACE
-                setPadding(0, 2, 0, 0)
+                setPadding(0, dp(ctx, 4), 0, dp(ctx, 4))
             }
-            card.addView(lblTimeLoc)
+            card.addView(lblBody)
 
-            contentContainer?.addView(card)
+            // Parsed Chips Row: [TYPE] [CODE] [DATE TIME] [ROOM ?]
+            val chipRow = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, dp(ctx, 2), 0, dp(ctx, 4))
+            }
+
+            chipRow.addView(createChipView(ctx, "[${parsed.type.name}]", Theme.typeColor(parsed.type)))
+            if (parsed.code.isNotEmpty()) {
+                chipRow.addView(createChipView(ctx, "[${parsed.code}]", Theme.INFO))
+            }
+            if (parsed.dateMillis != null) {
+                val dtChipStr = SimpleDateFormat("dd MMM hh:mm a", Locale.getDefault()).format(parsed.dateMillis)
+                chipRow.addView(createChipView(ctx, "[$dtChipStr]", Theme.TEXT))
+            }
+            if (parsed.room.isNotEmpty()) {
+                val roomLabel = if (parsed.roomConfidence == NoticeParser.Confidence.GUESS) "${parsed.room} ?" else parsed.room
+                val roomCol = if (parsed.roomConfidence == NoticeParser.Confidence.GUESS) Theme.WARN else Theme.TEXT
+                chipRow.addView(createChipView(ctx, "[$roomLabel]", roomCol))
+            }
+            card.addView(chipRow)
+
+            // Action: [ REVIEW -> ] (Hidden if already scheduled)
+            if (!isScheduled) {
+                val btnReview = Button(ctx).apply {
+                    text = "[ REVIEW -> ]"
+                    setTextColor(Theme.INFO)
+                    setBackgroundColor(Theme.BTN)
+                    textSize = 9f
+                    typeface = Typeface.MONOSPACE
+                    setPadding(dp(ctx, 10), dp(ctx, 2), dp(ctx, 10), dp(ctx, 2))
+                    val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        gravity = Gravity.END
+                    }
+                    layoutParams = lp
+                    setOnClickListener {
+                        openReviewForm(parsed, nId)
+                    }
+                }
+                card.addView(btnReview)
+            }
+
+            mainScrollContent?.addView(card)
+        }
+
+        if (renderedCount == 0) {
+            showEmptyMessage("No matching notices found.")
         }
     }
 
-    // --- FORM BUILDER (HUMANE, MONOSPACE & SOBER) ---
-    private fun buildFormView(ctx: Context, accent: Int, textCol: Int): LinearLayout {
+    private fun createChipView(ctx: Context, text: String, color: Int): TextView {
+        return TextView(ctx).apply {
+            this.text = text
+            setTextColor(color)
+            textSize = 8.5f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, 0, dp(ctx, 4), 0)
+        }
+    }
+
+    private fun showNoticeContextMenu(ctx: Context, noticeId: Long, rawText: String, parsed: NoticeParser.ParsedNotice) {
+        val options = arrayOf("Copy Text", "Ignore Notice", "Review & Schedule")
+        AlertDialog.Builder(ctx)
+            .setTitle("Notice Actions")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> {
+                        val cb = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        cb?.setPrimaryClip(ClipData.newPlainText("Notice", rawText))
+                    }
+                    1 -> {
+                        ignoredNoticeIds.add(noticeId)
+                        saveState()
+                        renderActiveView()
+                    }
+                    2 -> openReviewForm(parsed, noticeId)
+                }
+            }
+            .show()
+    }
+
+    // --- AGENDA TAB RENDERING (GROUPED CHRONOLOGICALLY) ---
+    private fun renderAgendaTab() {
+        val ctx = hostRef?.context ?: return
+        val allEvents = loadEventsList().sortedBy { it.startMillis }
+
+        if (allEvents.isEmpty()) {
+            showEmptyMessage("Agenda is empty. Convert a notice or tap +NEW.")
+            return
+        }
+
+        // Semester progress bar
+        val semBar = computeSemesterProgress()
+        val lblSem = TextView(ctx).apply {
+            text = "Semester $semBar"
+            setTextColor(Theme.DIM)
+            textSize = 9.5f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, 0, 0, dp(ctx, 6))
+        }
+        mainScrollContent?.addView(lblSem)
+
+        val now = Calendar.getInstance()
+        val todayMid = (now.clone() as Calendar).apply { set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 59); set(Calendar.SECOND, 59) }
+        val tomorrowMid = (now.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, 1); set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 59); set(Calendar.SECOND, 59) }
+        val weekEnd = (now.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, 7); set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 59); set(Calendar.SECOND, 59) }
+
+        val todayList = ArrayList<EventItem>()
+        val tomorrowList = ArrayList<EventItem>()
+        val weekList = ArrayList<EventItem>()
+        val laterList = ArrayList<EventItem>()
+        val archiveList = ArrayList<EventItem>()
+
+        for (ev in allEvents) {
+            val c = Calendar.getInstance().apply { timeInMillis = ev.startMillis }
+            when {
+                c.before(now) && !isSameDay(c, now) -> archiveList.add(ev)
+                isSameDay(c, now) -> todayList.add(ev)
+                isSameDay(c, (now.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, 1) }) -> tomorrowList.add(ev)
+                c.before(weekEnd) -> weekList.add(ev)
+                else -> laterList.add(ev)
+            }
+        }
+
+        fun renderGroup(title: String, list: List<EventItem>) {
+            if (list.isEmpty()) return
+            val secHdr = TextView(ctx).apply {
+                text = title
+                setTextColor(Theme.DIM)
+                textSize = 9f
+                typeface = Typeface.MONOSPACE
+                setPadding(0, dp(ctx, 6), 0, dp(ctx, 2))
+            }
+            mainScrollContent?.addView(secHdr)
+
+            for (ev in list) {
+                renderAgendaCard(ctx, ev)
+            }
+        }
+
+        renderGroup("TODAY", todayList)
+        renderGroup("TOMORROW", tomorrowList)
+        renderGroup("THIS WEEK", weekList)
+        renderGroup("LATER", laterList)
+
+        // Collapsed Archive Section
+        if (archiveList.isNotEmpty()) {
+            val btnArchiveToggle = Button(ctx).apply {
+                text = if (isArchivedExpanded) "▼ ARCHIVED (${archiveList.size})" else "▶ ARCHIVED (${archiveList.size})"
+                setTextColor(Theme.DIM)
+                setBackgroundColor(Theme.BTN)
+                textSize = 9f
+                typeface = Typeface.MONOSPACE
+                setPadding(dp(ctx, 8), dp(ctx, 4), dp(ctx, 8), dp(ctx, 4))
+                val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, dp(ctx, 8), 0, dp(ctx, 4))
+                }
+                layoutParams = lp
+                setOnClickListener {
+                    isArchivedExpanded = !isArchivedExpanded
+                    renderActiveView()
+                }
+            }
+            mainScrollContent?.addView(btnArchiveToggle)
+
+            if (isArchivedExpanded) {
+                for (ev in archiveList) {
+                    renderAgendaCard(ctx, ev, isPast = true)
+                }
+            }
+        }
+    }
+
+    private fun isSameDay(c1: Calendar, c2: Calendar): Boolean {
+        return c1.get(Calendar.YEAR) == c2.get(Calendar.YEAR) &&
+                c1.get(Calendar.DAY_OF_YEAR) == c2.get(Calendar.DAY_OF_YEAR)
+    }
+
+    private fun renderAgendaCard(ctx: Context, ev: EventItem, isPast: Boolean = false) {
+        val typeColor = Theme.typeColor(ev.type)
+        val card = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(if (isPast) Theme.CARD_DIM else Theme.CARD)
+            setPadding(dp(ctx, 10), dp(ctx, 6), dp(ctx, 10), dp(ctx, 6))
+            background = Theme.borderDrawable(if (isPast) Theme.CARD_DIM else Theme.CARD, if (isPast) Theme.DIM else typeColor, borderWidthPx = 3)
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 0, 0, dp(ctx, 6))
+            }
+            layoutParams = lp
+            setOnClickListener {
+                // Edit event in place
+                openReviewForm(null, ev.sourceNoticeId, existingEvent = ev)
+            }
+            setOnLongClickListener {
+                showDeleteEventDialog(ctx, ev)
+                true
+            }
+        }
+
+        val row1 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        val sdfTime = SimpleDateFormat("hh:mm a", Locale.getDefault())
+        val lblTimeType = TextView(ctx).apply {
+            val repeatTag = if (ev.isWeeklyRepeat) " ↻ weekly" else ""
+            text = "▌${sdfTime.format(ev.startMillis)} · ${ev.type.name}$repeatTag"
+            setTextColor(if (isPast) Theme.DIM else typeColor)
+            textSize = 9.5f
+            typeface = Typeface.MONOSPACE
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        row1.addView(lblTimeType)
+
+        val diff = ev.startMillis - System.currentTimeMillis()
+        val lblDiff = TextView(ctx).apply {
+            text = if (isPast) "PAST" else "in " + formatCountdown(diff)
+            setTextColor(Theme.DIM)
+            textSize = 9f
+            typeface = Typeface.MONOSPACE
+        }
+        row1.addView(lblDiff)
+        card.addView(row1)
+
+        val lblDetails = TextView(ctx).apply {
+            val codeStr = if (ev.code.isNotEmpty()) "${ev.code} · " else ""
+            val roomStr = if (ev.room.isNotEmpty()) " · ${ev.room}" else ""
+            text = "▌$codeStr${ev.title}$roomStr"
+            setTextColor(if (isPast) Theme.DIM else Theme.TEXT)
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+        }
+        card.addView(lblDetails)
+
+        mainScrollContent?.addView(card)
+    }
+
+    private fun showDeleteEventDialog(ctx: Context, ev: EventItem) {
+        AlertDialog.Builder(ctx)
+            .setTitle("Delete Event?")
+            .setMessage("Remove '${ev.title}' from agenda?")
+            .setPositiveButton("Delete") { _, _ ->
+                deleteEventById(ev.id)
+                refreshTabsVisual()
+                renderActiveView()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // --- REVIEW & APPROVE FORM ---
+    private fun buildReviewFormView(ctx: Context): LinearLayout {
         val form = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#111019"))
-            setPadding(10, 8, 10, 8)
+            setBackgroundColor(Theme.CARD)
+            setPadding(dp(ctx, 10), dp(ctx, 8), dp(ctx, 10), dp(ctx, 8))
             visibility = View.GONE
         }
 
-        val hdr = TextView(ctx).apply {
-            text = "REVIEW & APPROVE EVENT"
-            setTextColor(accent)
-            textSize = 11f
+        val lblSource = TextView(ctx).apply {
+            setTextColor(Theme.DIM)
+            textSize = 8.5f
             typeface = Typeface.MONOSPACE
-            setPadding(0, 0, 0, 6)
+            setPadding(0, 0, 0, dp(ctx, 6))
         }
-        form.addView(hdr)
+        form.addView(lblSource)
 
-        // Type Selector Row
-        val typeRow = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 0, 0, 6)
+        // Type row
+        val lblType = TextView(ctx).apply {
+            text = "TYPE"
+            setTextColor(Theme.DIM)
+            textSize = 8.5f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, 0, 0, dp(ctx, 2))
         }
-        val types = listOf(EventType.EXAM to "EXAM", EventType.CLASS to "CLASS", EventType.LAB to "LAB", EventType.EVENT to "EVENT")
-        for ((t, label) in types) {
+        form.addView(lblType)
+
+        val typeRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        for (t in EventType.values()) {
+            val b = Button(ctx).apply {
+                text = t.name
+                textSize = 9f
+                typeface = Typeface.MONOSPACE
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    setMargins(dp(ctx, 1), 0, dp(ctx, 1), 0)
+                }
+                setOnClickListener {
+                    formType = t
+                    refreshFormTypeButtons()
+                    checkConflicts()
+                }
+            }
+            typeBtnMap[t] = b
+            typeRow.addView(b)
+        }
+        form.addView(typeRow)
+
+        // Exam Subtype row (visible only if EXAM)
+        formExamSubtypeRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(ctx, 4), 0, dp(ctx, 2))
+        }
+        val lblSubtype = TextView(ctx).apply {
+            text = "EXAM SUBTYPE"
+            setTextColor(Theme.DIM)
+            textSize = 8.5f
+            typeface = Typeface.MONOSPACE
+        }
+        formExamSubtypeRow?.addView(lblSubtype)
+
+        val subRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        val subtypes = listOf("Class Test / TT", "Mid", "Final")
+        for (st in subtypes) {
+            val b = Button(ctx).apply {
+                text = st
+                textSize = 8.5f
+                typeface = Typeface.MONOSPACE
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    setMargins(dp(ctx, 1), 0, dp(ctx, 1), 0)
+                }
+                setOnClickListener {
+                    formExamSubtype = st
+                    refreshExamSubtypeButtons()
+                }
+            }
+            examSubtypeBtnMap[st] = b
+            subRow.addView(b)
+        }
+        formExamSubtypeRow?.addView(subRow)
+        form.addView(formExamSubtypeRow)
+
+        // Weekly repeat toggle for CLASS
+        formBtnRepeat = Button(ctx).apply {
+            text = "REPEAT WEEKLY: [OFF]"
+            setTextColor(Theme.DIM)
+            setBackgroundColor(Theme.BTN)
+            textSize = 9f
+            typeface = Typeface.MONOSPACE
+            visibility = View.GONE
+            setOnClickListener {
+                formWeeklyRepeat = !formWeeklyRepeat
+                text = if (formWeeklyRepeat) "REPEAT WEEKLY: [ON ↻]" else "REPEAT WEEKLY: [OFF]"
+                setTextColor(if (formWeeklyRepeat) Theme.OK else Theme.DIM)
+            }
+        }
+        form.addView(formBtnRepeat)
+
+        // Details Section (Auto-filled with badges)
+        val lblDetails = TextView(ctx).apply {
+            text = "DETAILS"
+            setTextColor(Theme.DIM)
+            textSize = 8.5f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, dp(ctx, 4), 0, dp(ctx, 2))
+        }
+        form.addView(lblDetails)
+
+        val detailsCard = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Theme.BG)
+            setPadding(dp(ctx, 8), dp(ctx, 6), dp(ctx, 8), dp(ctx, 6))
+        }
+
+        // Title row with badge
+        val titleRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        formInputTitle = EditText(ctx).apply {
+            hint = "Title / Event name..."
+            setTextColor(Theme.TEXT)
+            setHintTextColor(Theme.DIM)
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            setBackgroundColor(Color.TRANSPARENT)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    lblBadgeTitle?.visibility = View.GONE
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            })
+        }
+        titleRow.addView(formInputTitle)
+        lblBadgeTitle = createBadgeView(ctx)
+        titleRow.addView(lblBadgeTitle)
+        detailsCard.addView(titleRow)
+
+        // Code row with badge
+        val codeRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        formInputCode = EditText(ctx).apply {
+            hint = "Code (e.g. CSE 0541 1143)"
+            setTextColor(Theme.TEXT)
+            setHintTextColor(Theme.DIM)
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            setBackgroundColor(Color.TRANSPARENT)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    lblBadgeCode?.visibility = View.GONE
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            })
+        }
+        codeRow.addView(formInputCode)
+        lblBadgeCode = createBadgeView(ctx)
+        codeRow.addView(lblBadgeCode)
+        detailsCard.addView(codeRow)
+
+        // Room row with badge
+        val roomRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        formInputRoom = EditText(ctx).apply {
+            hint = "Room / Venue"
+            setTextColor(Theme.TEXT)
+            setHintTextColor(Theme.DIM)
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            setBackgroundColor(Color.TRANSPARENT)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    lblBadgeRoom?.visibility = View.GONE
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            })
+        }
+        roomRow.addView(formInputRoom)
+        lblBadgeRoom = createBadgeView(ctx)
+        roomRow.addView(lblBadgeRoom)
+        detailsCard.addView(roomRow)
+
+        // Date and Time Row with badge
+        val dtRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(ctx, 4), 0, 0)
+        }
+        formBtnDate = Button(ctx).apply {
+            textSize = 9.5f
+            typeface = Typeface.MONOSPACE
+            setTextColor(Theme.INFO)
+            setBackgroundColor(Theme.BTN)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.1f).apply {
+                setMargins(0, 0, dp(ctx, 2), 0)
+            }
+            setOnClickListener { showDatePickerDialog(ctx) }
+        }
+        dtRow.addView(formBtnDate)
+
+        formBtnTime = Button(ctx).apply {
+            textSize = 9.5f
+            typeface = Typeface.MONOSPACE
+            setTextColor(Theme.INFO)
+            setBackgroundColor(Theme.BTN)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(dp(ctx, 2), 0, dp(ctx, 2), 0)
+            }
+            setOnClickListener { showTimePickerDialog(ctx) }
+        }
+        dtRow.addView(formBtnTime)
+
+        lblBadgeDate = createBadgeView(ctx)
+        dtRow.addView(lblBadgeDate)
+        detailsCard.addView(dtRow)
+
+        form.addView(detailsCard)
+
+        // Alarm Row
+        val lblAlarm = TextView(ctx).apply {
+            text = "ALARM BEFORE"
+            setTextColor(Theme.DIM)
+            textSize = 8.5f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, dp(ctx, 6), 0, dp(ctx, 2))
+        }
+        form.addView(lblAlarm)
+
+        val alarmRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        val alarmOptions = listOf(0 to "0", 15 to "15m", 30 to "30m", 60 to "1h", 1440 to "1d")
+        for ((mins, label) in alarmOptions) {
             val b = Button(ctx).apply {
                 text = label
                 textSize = 9f
                 typeface = Typeface.MONOSPACE
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    setMargins(2, 0, 2, 0)
+                    setMargins(dp(ctx, 1), 0, dp(ctx, 1), 0)
                 }
                 setOnClickListener {
-                    selectedType = t
-                    refreshTypeButtons(accent)
+                    formAlarmOffset = mins
+                    refreshAlarmButtons()
                 }
             }
-            typeButtons[t] = b
-            typeRow.addView(b)
-        }
-        form.addView(typeRow)
-
-        // Title Input
-        inputTitle = EditText(ctx).apply {
-            hint = "Title / Subject..."
-            setTextColor(textCol)
-            setHintTextColor(Color.parseColor("#6272A4"))
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            setBackgroundColor(Color.parseColor("#1A1926"))
-            setPadding(8, 6, 8, 6)
-        }
-        form.addView(inputTitle)
-
-        // Code & Room Row
-        val codeRoomRow = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 4, 0, 4)
-        }
-        inputCode = EditText(ctx).apply {
-            hint = "Code (e.g. CSE311)"
-            setTextColor(textCol)
-            setHintTextColor(Color.parseColor("#6272A4"))
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            setBackgroundColor(Color.parseColor("#1A1926"))
-            setPadding(8, 6, 8, 6)
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(0, 0, 2, 0)
-            }
-        }
-        codeRoomRow.addView(inputCode)
-
-        inputRoom = EditText(ctx).apply {
-            hint = "Room / Venue"
-            setTextColor(textCol)
-            setHintTextColor(Color.parseColor("#6272A4"))
-            textSize = 10f
-            typeface = Typeface.MONOSPACE
-            setBackgroundColor(Color.parseColor("#1A1926"))
-            setPadding(8, 6, 8, 6)
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(2, 0, 0, 0)
-            }
-        }
-        codeRoomRow.addView(inputRoom)
-        form.addView(codeRoomRow)
-
-        // Date and Time Pickers Row
-        val dtRow = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 2, 0, 4)
-        }
-        btnDate = Button(ctx).apply {
-            textSize = 9.5f
-            typeface = Typeface.MONOSPACE
-            setTextColor(Color.parseColor("#00E5FF"))
-            setBackgroundColor(Color.parseColor("#1F1E2D"))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(0, 0, 2, 0)
-            }
-            setOnClickListener { showDatePicker(ctx) }
-        }
-        dtRow.addView(btnDate)
-
-        btnTime = Button(ctx).apply {
-            textSize = 9.5f
-            typeface = Typeface.MONOSPACE
-            setTextColor(Color.parseColor("#00E5FF"))
-            setBackgroundColor(Color.parseColor("#1F1E2D"))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(2, 0, 0, 0)
-            }
-            setOnClickListener { showTimePicker(ctx) }
-        }
-        dtRow.addView(btnTime)
-        form.addView(dtRow)
-        updateDateTimeButtons()
-
-        // Alarm Offset Row
-        val alarmRow = LinearLayout(ctx).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 2, 0, 4)
-        }
-        val offsets = listOf(0 to "No Alarm", 15 to "15m before", 30 to "30m before", 60 to "1h before")
-        for ((mins, label) in offsets) {
-            val b = Button(ctx).apply {
-                text = label
-                textSize = 8.5f
-                typeface = Typeface.MONOSPACE
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    setMargins(1, 0, 1, 0)
-                }
-                setOnClickListener {
-                    alarmOffsetMinutes = mins
-                    refreshAlarmButtons(accent)
-                }
-            }
-            alarmButtons[mins] = b
+            alarmBtnMap[mins] = b
             alarmRow.addView(b)
         }
         form.addView(alarmRow)
-        refreshAlarmButtons(accent)
 
-        // Notice quote preview
-        lblNoticeQuote = TextView(ctx).apply {
-            text = ""
-            setTextColor(Color.parseColor("#6272A4"))
-            textSize = 8.5f
+        // Conflict warning view
+        formLblConflict = TextView(ctx).apply {
+            setTextColor(Theme.WARN)
+            textSize = 9f
             typeface = Typeface.MONOSPACE
-            setPadding(4, 2, 4, 4)
+            setPadding(0, dp(ctx, 4), 0, dp(ctx, 4))
             visibility = View.GONE
         }
-        form.addView(lblNoticeQuote)
+        form.addView(formLblConflict)
 
-        // Action Buttons Row (Discard vs Approve)
+        // Discard vs Approve Action Buttons
         val actRow = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 4, 0, 4)
+            setPadding(0, dp(ctx, 6), 0, 0)
         }
         val btnDiscard = Button(ctx).apply {
-            text = "DISCARD"
-            setTextColor(Color.parseColor("#FF5555"))
-            setBackgroundColor(Color.parseColor("#1F1E2D"))
+            text = "[ DISCARD ]"
+            setTextColor(Theme.ERR)
+            setBackgroundColor(Theme.BTN)
             textSize = 10f
             typeface = Typeface.MONOSPACE
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(0, 0, 3, 0)
+                setMargins(0, 0, dp(ctx, 3), 0)
             }
             setOnClickListener {
-                isFormVisible = false
-                renderActiveTab()
+                isFormOpen = false
+                form.visibility = View.GONE
+                renderActiveView()
             }
         }
         actRow.addView(btnDiscard)
 
         val btnApprove = Button(ctx).apply {
-            text = "APPROVE & SCHEDULE"
-            setTextColor(Color.parseColor("#0A0A0F"))
-            setBackgroundColor(Color.parseColor("#50FA7B"))
+            text = "[ APPROVE & SCHEDULE ]"
+            setTextColor(Theme.BG)
+            setBackgroundColor(Theme.OK)
             textSize = 10f
             typeface = Typeface.MONOSPACE
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.4f).apply {
-                setMargins(3, 0, 0, 0)
+                setMargins(dp(ctx, 3), 0, 0, 0)
             }
-            setOnClickListener { approveAndSave(ctx) }
+            setOnClickListener {
+                saveFormEvent(ctx)
+            }
         }
         actRow.addView(btnApprove)
         form.addView(actRow)
 
-        refreshTypeButtons(accent)
         return form
     }
 
-    private fun openEventForm(type: EventType, code: String, title: String, room: String, noticeText: String) {
-        val accent = hostRef?.accentTextColor ?: Color.CYAN
-        selectedType = type
-        inputCode?.setText(code)
-        inputTitle?.setText(title)
-        inputRoom?.setText(room)
-        pendingNoticeText = noticeText
+    private fun createBadgeView(ctx: Context): TextView {
+        return TextView(ctx).apply {
+            textSize = 8.5f
+            typeface = Typeface.MONOSPACE
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(ctx, 4), 0, 0, 0)
+            visibility = View.GONE
+        }
+    }
 
-        if (noticeText.isNotEmpty()) {
-            lblNoticeQuote?.text = "Source: ${noticeText.take(90)}..."
-            lblNoticeQuote?.visibility = View.VISIBLE
+    private fun setBadge(view: TextView?, conf: NoticeParser.Confidence) {
+        if (view == null) return
+        when (conf) {
+            NoticeParser.Confidence.SURE -> {
+                view.text = "✓ sure"
+                view.setTextColor(Theme.OK)
+                view.visibility = View.VISIBLE
+            }
+            NoticeParser.Confidence.GUESS -> {
+                view.text = "~ guess"
+                view.setTextColor(Theme.WARN)
+                view.visibility = View.VISIBLE
+            }
+            NoticeParser.Confidence.NONE -> {
+                view.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun openReviewForm(parsed: NoticeParser.ParsedNotice?, noticeId: Long?, existingEvent: EventItem? = null) {
+        val form = reviewFormCard ?: return
+        editingEventId = existingEvent?.id
+        formNoticeId = existingEvent?.sourceNoticeId ?: (noticeId ?: 0L)
+        formSourceText = existingEvent?.notes ?: (parsed?.rawNotice ?: "")
+
+        val lblSource = form.getChildAt(0) as? TextView
+        if (formSourceText.isNotEmpty()) {
+            lblSource?.text = "Source: ${formSourceText.take(80)}..."
+            lblSource?.visibility = View.VISIBLE
         } else {
-            lblNoticeQuote?.visibility = View.GONE
+            lblSource?.visibility = View.GONE
         }
 
-        refreshTypeButtons(accent)
-        updateDateTimeButtons()
+        if (existingEvent != null) {
+            formType = existingEvent.type
+            formInputTitle?.setText(existingEvent.title)
+            formInputCode?.setText(existingEvent.code)
+            formInputRoom?.setText(existingEvent.room)
+            formCalendar.timeInMillis = existingEvent.startMillis
+            formAlarmOffset = existingEvent.alarmOffsetMins
+            formWeeklyRepeat = existingEvent.isWeeklyRepeat
 
-        isFormVisible = true
-        formCard?.visibility = View.VISIBLE
+            lblBadgeTitle?.visibility = View.GONE
+            lblBadgeCode?.visibility = View.GONE
+            lblBadgeRoom?.visibility = View.GONE
+            lblBadgeDate?.visibility = View.GONE
+        } else if (parsed != null) {
+            formType = parsed.type
+            formInputTitle?.setText(parsed.title)
+            formInputCode?.setText(parsed.code)
+            formInputRoom?.setText(parsed.room)
+            if (parsed.dateMillis != null) {
+                formCalendar.timeInMillis = parsed.dateMillis
+            }
+            formAlarmOffset = 30
+            formWeeklyRepeat = false
+
+            setBadge(lblBadgeTitle, parsed.titleConfidence)
+            setBadge(lblBadgeCode, parsed.codeConfidence)
+            setBadge(lblBadgeRoom, parsed.roomConfidence)
+            setBadge(lblBadgeDate, parsed.dateConfidence)
+        }
+
+        refreshFormTypeButtons()
+        refreshExamSubtypeButtons()
+        refreshAlarmButtons()
+        updateFormDateTimeButtons()
+        checkConflicts()
+
+        isFormOpen = true
+        form.visibility = View.VISIBLE
     }
 
-    private fun refreshTypeButtons(accent: Int) {
-        val darkBg = Color.parseColor("#1F1E2D")
-        for ((t, btn) in typeButtons) {
-            if (t == selectedType) {
-                btn.setBackgroundColor(accent)
-                btn.setTextColor(Color.parseColor("#0A0A0F"))
+    private fun refreshFormTypeButtons() {
+        for ((t, btn) in typeBtnMap) {
+            if (t == formType) {
+                btn.setBackgroundColor(Theme.typeColor(t))
+                btn.setTextColor(Theme.BG)
+                btn.text = "${t.name}*"
             } else {
-                btn.setBackgroundColor(darkBg)
-                btn.setTextColor(Color.parseColor("#8E8CA0"))
+                btn.setBackgroundColor(Theme.BTN)
+                btn.setTextColor(Theme.DIM)
+                btn.text = t.name
+            }
+        }
+        formExamSubtypeRow?.visibility = if (formType == EventType.EXAM) View.VISIBLE else View.GONE
+        formBtnRepeat?.visibility = if (formType == EventType.CLASS) View.VISIBLE else View.GONE
+    }
+
+    private fun refreshExamSubtypeButtons() {
+        for ((st, btn) in examSubtypeBtnMap) {
+            if (st == formExamSubtype) {
+                btn.setBackgroundColor(Theme.ERR)
+                btn.setTextColor(Theme.BG)
+                btn.text = "$st*"
+            } else {
+                btn.setBackgroundColor(Theme.BTN)
+                btn.setTextColor(Theme.DIM)
+                btn.text = st
             }
         }
     }
 
-    private fun refreshAlarmButtons(accent: Int) {
-        val darkBg = Color.parseColor("#1F1E2D")
-        for ((mins, btn) in alarmButtons) {
-            if (mins == alarmOffsetMinutes) {
-                btn.setBackgroundColor(Color.parseColor("#F1FA8C"))
-                btn.setTextColor(Color.parseColor("#0A0A0F"))
+    private fun refreshAlarmButtons() {
+        for ((mins, btn) in alarmBtnMap) {
+            val label = when (mins) {
+                0 -> "0"; 15 -> "15m"; 30 -> "30m"; 60 -> "1h"; else -> "1d"
+            }
+            if (mins == formAlarmOffset) {
+                btn.setBackgroundColor(Theme.WARN)
+                btn.setTextColor(Theme.BG)
+                btn.text = "$label*"
             } else {
-                btn.setBackgroundColor(darkBg)
-                btn.setTextColor(Color.parseColor("#8E8CA0"))
+                btn.setBackgroundColor(Theme.BTN)
+                btn.setTextColor(Theme.DIM)
+                btn.text = label
             }
         }
     }
 
-    private fun updateDateTimeButtons() {
+    private fun updateFormDateTimeButtons() {
         val sdfDate = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
         val sdfTime = SimpleDateFormat("hh:mm a", Locale.getDefault())
-        btnDate?.text = sdfDate.format(eventCalendar.time)
-        btnTime?.text = sdfTime.format(eventCalendar.time)
+        formBtnDate?.text = sdfDate.format(formCalendar.time)
+        formBtnTime?.text = sdfTime.format(formCalendar.time)
     }
 
-    private fun showDatePicker(ctx: Context) {
+    private fun showDatePickerDialog(ctx: Context) {
         DatePickerDialog(
             ctx,
             { _, year, month, day ->
-                eventCalendar.set(Calendar.YEAR, year)
-                eventCalendar.set(Calendar.MONTH, month)
-                eventCalendar.set(Calendar.DAY_OF_MONTH, day)
-                updateDateTimeButtons()
+                formCalendar.set(Calendar.YEAR, year)
+                formCalendar.set(Calendar.MONTH, month)
+                formCalendar.set(Calendar.DAY_OF_MONTH, day)
+                lblBadgeDate?.visibility = View.GONE
+                updateFormDateTimeButtons()
+                checkConflicts()
             },
-            eventCalendar.get(Calendar.YEAR),
-            eventCalendar.get(Calendar.MONTH),
-            eventCalendar.get(Calendar.DAY_OF_MONTH)
+            formCalendar.get(Calendar.YEAR),
+            formCalendar.get(Calendar.MONTH),
+            formCalendar.get(Calendar.DAY_OF_MONTH)
         ).show()
     }
 
-    private fun showTimePicker(ctx: Context) {
+    private fun showTimePickerDialog(ctx: Context) {
         TimePickerDialog(
             ctx,
             { _, hour, min ->
-                eventCalendar.set(Calendar.HOUR_OF_DAY, hour)
-                eventCalendar.set(Calendar.MINUTE, min)
-                updateDateTimeButtons()
+                formCalendar.set(Calendar.HOUR_OF_DAY, hour)
+                formCalendar.set(Calendar.MINUTE, min)
+                lblBadgeDate?.visibility = View.GONE
+                updateFormDateTimeButtons()
+                checkConflicts()
             },
-            eventCalendar.get(Calendar.HOUR_OF_DAY),
-            eventCalendar.get(Calendar.MINUTE),
+            formCalendar.get(Calendar.HOUR_OF_DAY),
+            formCalendar.get(Calendar.MINUTE),
             false
         ).show()
     }
 
-    private fun approveAndSave(ctx: Context) {
-        val title = inputTitle?.text?.toString()?.trim()?.ifEmpty { "Event" } ?: "Event"
-        val code = inputCode?.text?.toString()?.trim() ?: ""
-        val room = inputRoom?.text?.toString()?.trim() ?: ""
-        val startMillis = eventCalendar.timeInMillis
-
-        // 1. Save to local Agenda JSON
-        val ev = JSONObject().apply {
-            put("type", selectedType.name)
-            put("title", title)
-            put("code", code)
-            put("room", room)
-            put("start_millis", startMillis)
-            put("notes", pendingNoticeText)
-            put("alarm_offset", alarmOffsetMinutes)
+    private fun checkConflicts() {
+        val chosenStart = formCalendar.timeInMillis
+        val events = loadEventsList()
+        val conflict = events.firstOrNull { ev ->
+            ev.id != editingEventId && Math.abs(ev.startMillis - chosenStart) < 3_600_000L
         }
-        saveEvent(ev)
 
-        // 2. Insert into System Calendar
+        if (conflict != null) {
+            val sdf = SimpleDateFormat("hh:mm a", Locale.getDefault())
+            formLblConflict?.text = "⚠ Conflict: ${conflict.title} (${sdf.format(conflict.startMillis)})"
+            formLblConflict?.visibility = View.VISIBLE
+        } else {
+            formLblConflict?.visibility = View.GONE
+        }
+    }
+
+    private fun saveFormEvent(ctx: Context) {
+        val title = formInputTitle?.text?.toString()?.trim()?.ifEmpty { "Event" } ?: "Event"
+        val code = formInputCode?.text?.toString()?.trim() ?: ""
+        val room = formInputRoom?.text?.toString()?.trim() ?: ""
+        val startMillis = formCalendar.timeInMillis
+
+        val eventItem = EventItem(
+            id = editingEventId ?: UUID.randomUUID().toString(),
+            sourceNoticeId = formNoticeId,
+            type = formType,
+            title = if (formType == EventType.EXAM && !title.contains(formExamSubtype)) "$title ($formExamSubtype)" else title,
+            code = code,
+            room = room,
+            startMillis = startMillis,
+            alarmOffsetMins = formAlarmOffset,
+            isWeeklyRepeat = formWeeklyRepeat,
+            notes = formSourceText
+        )
+
+        upsertEvent(eventItem)
+
+        // System Calendar Intent
         try {
-            val eventTitle = if (code.isNotEmpty()) "[$selectedType] $code: $title" else "[$selectedType] $title"
+            val eventTitle = if (code.isNotEmpty()) "[${eventItem.type}] $code: ${eventItem.title}" else "[${eventItem.type}] ${eventItem.title}"
             val calIntent = Intent(Intent.ACTION_INSERT).apply {
                 data = CalendarContract.Events.CONTENT_URI
                 putExtra(CalendarContract.Events.TITLE, eventTitle)
                 putExtra(CalendarContract.Events.EVENT_LOCATION, room)
-                putExtra(CalendarContract.Events.DESCRIPTION, pendingNoticeText)
+                putExtra(CalendarContract.Events.DESCRIPTION, formSourceText)
                 putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, startMillis)
-                putExtra(CalendarContract.EXTRA_EVENT_END_TIME, startMillis + 3600000L)
+                putExtra(CalendarContract.EXTRA_EVENT_END_TIME, startMillis + 3_600_000L)
+                if (formWeeklyRepeat) {
+                    putExtra(CalendarContract.Events.RRULE, "FREQ=WEEKLY")
+                }
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             ctx.startActivity(calIntent)
-        } catch (e: Throwable) {}
+        } catch (_: Throwable) {}
 
-        // 3. Set System Alarm Clock
-        if (alarmOffsetMinutes > 0) {
+        // System Alarm Clock Intent
+        if (formAlarmOffset > 0) {
             try {
-                val alarmMillis = startMillis - (alarmOffsetMinutes * 60000L)
-                val cal = Calendar.getInstance().apply { timeInMillis = alarmMillis }
+                val alarmTime = startMillis - (formAlarmOffset * 60_000L)
+                val cal = Calendar.getInstance().apply { timeInMillis = alarmTime }
                 val alarmIntent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
-                    val msg = if (code.isNotEmpty()) "$code: $title" else title
+                    val msg = if (code.isNotEmpty()) "$code: ${eventItem.title}" else eventItem.title
                     putExtra(AlarmClock.EXTRA_MESSAGE, msg)
                     putExtra(AlarmClock.EXTRA_HOUR, cal.get(Calendar.HOUR_OF_DAY))
                     putExtra(AlarmClock.EXTRA_MINUTES, cal.get(Calendar.MINUTE))
@@ -808,52 +1628,258 @@ class ScheduleModule : RetuiDexModule {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 ctx.startActivity(alarmIntent)
-            } catch (e: Throwable) {}
+            } catch (_: Throwable) {}
         }
 
-        // Close form and switch to Agenda view
-        isFormVisible = false
-        activeTab = Tab.AGENDA
-        val accent = hostRef?.accentTextColor ?: Color.CYAN
-        refreshTabs(accent)
-        renderActiveTab()
+        isFormOpen = false
+        reviewFormCard?.visibility = View.GONE
+        switchTab(Tab.AGENDA)
     }
 
-    // --- AGENDA PERSISTENCE ---
-    private fun eventsFile(): File =
-        File("/sdcard/Re-T-UI/dex-modules/schedule/events.json")
-
-    private fun loadEvents(): JSONArray {
-        val f = eventsFile()
-        if (!f.isFile) return JSONArray()
+    // --- DATA REPOSITORIES (ATOMIC WRITES & BACKWARD COMPATIBILITY) ---
+    private fun loadNoticesJson(): JSONObject? {
+        val f = File(PATH_NOTICES)
+        if (!f.isFile) return null
         return try {
-            JSONArray(f.readText())
-        } catch (e: Throwable) {
-            JSONArray()
+            JSONObject(f.readText())
+        } catch (_: Throwable) {
+            null
         }
     }
 
-    private fun saveEvent(ev: JSONObject) {
-        val arr = loadEvents()
-        arr.put(ev)
+    private fun loadEventsList(): List<EventItem> {
+        val f = File(PATH_EVENTS)
+        if (!f.isFile) return emptyList()
+        val list = ArrayList<EventItem>()
         try {
-            eventsFile().parentFile?.mkdirs()
-            eventsFile().writeText(arr.toString(2))
-        } catch (e: Throwable) {}
+            val arr = JSONArray(f.readText())
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val id = o.optString("id", "").ifEmpty { UUID.randomUUID().toString() }
+                val srcId = o.optLong("source_notice_id", o.optLong("sourceNoticeId", 0L))
+                val typeStr = o.optString("type", "EVENT")
+                val type = try { EventType.valueOf(typeStr) } catch (_: Throwable) { EventType.EVENT }
+                list.add(
+                    EventItem(
+                        id = id,
+                        sourceNoticeId = srcId,
+                        type = type,
+                        title = o.optString("title", "Untitled"),
+                        code = o.optString("code", ""),
+                        room = o.optString("room", ""),
+                        startMillis = o.optLong("start_millis", o.optLong("startMillis", 0L)),
+                        alarmOffsetMins = o.optInt("alarm_offset", o.optInt("alarmOffsetMins", 30)),
+                        isWeeklyRepeat = o.optBoolean("is_weekly_repeat", o.optBoolean("isWeeklyRepeat", false)),
+                        notes = o.optString("notes", "")
+                    )
+                )
+            }
+        } catch (_: Throwable) {}
+        return list
     }
 
-    private fun deleteEvent(index: Int) {
-        val arr = loadEvents()
-        val newArr = JSONArray()
-        for (i in 0 until arr.length()) {
-            if (i != index) newArr.put(arr.get(i))
+    private fun ensureEventIds() {
+        val f = File(PATH_EVENTS)
+        if (!f.isFile) return
+        try {
+            val arr = JSONArray(f.readText())
+            var modified = false
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                if (!o.has("id")) {
+                    o.put("id", UUID.randomUUID().toString())
+                    modified = true
+                }
+            }
+            if (modified) {
+                atomicWriteText(f, arr.toString(2))
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun upsertEvent(item: EventItem) {
+        val current = loadEventsList().filter { it.id != item.id }.toMutableList()
+        current.add(item)
+        saveEventsList(current)
+    }
+
+    private fun deleteEventById(id: String) {
+        val current = loadEventsList().filter { it.id != id }
+        saveEventsList(current)
+    }
+
+    private fun saveEventsList(items: List<EventItem>) {
+        val arr = JSONArray()
+        for (ev in items) {
+            val o = JSONObject().apply {
+                put("id", ev.id)
+                put("source_notice_id", ev.sourceNoticeId)
+                put("type", ev.type.name)
+                put("title", ev.title)
+                put("code", ev.code)
+                put("room", ev.room)
+                put("start_millis", ev.startMillis)
+                put("alarm_offset", ev.alarmOffsetMins)
+                put("is_weekly_repeat", ev.isWeeklyRepeat)
+                put("notes", ev.notes)
+            }
+            arr.put(o)
+        }
+        atomicWriteText(File(PATH_EVENTS), arr.toString(2))
+    }
+
+    private fun getScheduledNoticeIds(): Set<Long> {
+        val set = HashSet<Long>()
+        for (ev in loadEventsList()) {
+            if (ev.sourceNoticeId > 0L) set.add(ev.sourceNoticeId)
+        }
+        return set
+    }
+
+    private fun getNextUpcomingEvent(): EventItem? {
+        val now = System.currentTimeMillis()
+        return loadEventsList()
+            .filter { it.startMillis > now }
+            .minByOrNull { it.startMillis }
+    }
+
+    private fun loadState() {
+        val f = File(PATH_STATE)
+        if (!f.isFile) return
+        try {
+            val json = JSONObject(f.readText())
+            lastSeenTs = json.optLong("last_seen_ts", 0L)
+            val arr = json.optJSONArray("ignored_notice_ids") ?: JSONArray()
+            ignoredNoticeIds.clear()
+            for (i in 0 until arr.length()) {
+                ignoredNoticeIds.add(arr.getLong(i))
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun saveState() {
+        try {
+            val json = JSONObject().apply {
+                put("last_seen_ts", lastSeenTs)
+                val arr = JSONArray()
+                ignoredNoticeIds.forEach { arr.put(it) }
+                put("ignored_notice_ids", arr)
+            }
+            atomicWriteText(File(PATH_STATE), json.toString(2))
+        } catch (_: Throwable) {}
+    }
+
+    private fun markAllNoticesSeen() {
+        val notices = loadNoticesJson() ?: return
+        var maxTs = lastSeenTs
+        val off = notices.optJSONObject("official_notices")?.optJSONArray("messages") ?: JSONArray()
+        for (i in 0 until off.length()) {
+            maxTs = Math.max(maxTs, off.getJSONObject(i).optLong("timestamp", 0L))
+        }
+        val sch = notices.optJSONObject("class_schedule")?.optJSONArray("messages") ?: JSONArray()
+        for (i in 0 until sch.length()) {
+            maxTs = Math.max(maxTs, sch.getJSONObject(i).optLong("timestamp", 0L))
+        }
+        if (maxTs > lastSeenTs) {
+            lastSeenTs = maxTs
+            saveState()
+        }
+    }
+
+    private fun computeUnreadCount(): Int {
+        val notices = loadNoticesJson() ?: return 0
+        var count = 0
+        val off = notices.optJSONObject("official_notices")?.optJSONArray("messages") ?: JSONArray()
+        for (i in 0 until off.length()) {
+            val m = off.getJSONObject(i)
+            val nId = m.optLong("id", 0L)
+            if (!ignoredNoticeIds.contains(nId) && m.optLong("timestamp", 0L) > lastSeenTs) {
+                count++
+            }
+        }
+        return count
+    }
+
+    private fun computeSemesterProgress(): String {
+        return try {
+            val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+            val start = sdf.parse(SEMESTER_START)?.time ?: 0L
+            val end = sdf.parse(SEMESTER_END)?.time ?: 0L
+            val now = System.currentTimeMillis()
+            if (now < start) return "[░░░░░░░░░░] 0%"
+            if (now > end) return "[██████████] 100%"
+            val pct = (((now - start).toDouble() / (end - start).toDouble()) * 100).toInt().coerceIn(0, 100)
+            val filled = pct / 10
+            "[" + "█".repeat(filled) + "░".repeat(10 - filled) + "] $pct%"
+        } catch (_: Throwable) {
+            "[██████░░░░] 60%"
+        }
+    }
+
+    private fun checkAutoRefresh() {
+        val f = File(PATH_NOTICES)
+        if (!f.isFile) {
+            triggerBackgroundRefresh()
+            return
         }
         try {
-            eventsFile().writeText(newArr.toString(2))
-        } catch (e: Throwable) {}
+            val json = JSONObject(f.readText())
+            val updated = json.optLong("updated_at", 0L)
+            if (System.currentTimeMillis() - updated > 15 * 60_000L) {
+                triggerBackgroundRefresh()
+            }
+        } catch (_: Throwable) {}
+    }
+
+    private fun triggerBackgroundRefresh() {
+        hostRef?.executeCommand("termux -run ~/retui/wa_fetch.sh")
+        mainHandler.postDelayed({
+            updateUpdatedHeader()
+            renderActiveView()
+        }, 1200)
+    }
+
+    private fun updateUpdatedHeader() {
+        val f = File(PATH_NOTICES)
+        if (!f.isFile) {
+            lblUpdatedHeader?.text = "not synced"
+            return
+        }
+        try {
+            val json = JSONObject(f.readText())
+            val updated = json.optLong("updated_at", 0L)
+            val diffMins = (System.currentTimeMillis() - updated) / 60_000L
+            lblUpdatedHeader?.text = if (diffMins <= 0) "updated just now" else "updated ${diffMins}m ago"
+        } catch (_: Throwable) {
+            lblUpdatedHeader?.text = ""
+        }
+    }
+
+    private fun atomicWriteText(target: File, content: String) {
+        try {
+            target.parentFile?.mkdirs()
+            val tmp = File(target.parentFile, "${target.name}.tmp")
+            tmp.writeText(content, Charsets.UTF_8)
+            tmp.renameTo(target)
+        } catch (_: Throwable) {}
+    }
+
+    private fun showEmptyMessage(msg: String) {
+        val ctx = hostRef?.context ?: return
+        val tv = TextView(ctx).apply {
+            text = msg
+            setTextColor(Theme.DIM)
+            textSize = 9.5f
+            typeface = Typeface.MONOSPACE
+            setPadding(dp(ctx, 10), dp(ctx, 16), dp(ctx, 10), dp(ctx, 16))
+        }
+        mainScrollContent?.addView(tv)
     }
 
     override fun onDestroy() {
+        isDestroyed = true
+        mainHandler.removeCallbacks(tickerRunnable)
+        mainHandler.removeCallbacksAndMessages(null)
         hostRef = null
     }
 }
