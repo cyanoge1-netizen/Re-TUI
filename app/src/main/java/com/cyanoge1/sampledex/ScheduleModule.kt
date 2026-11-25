@@ -450,13 +450,14 @@ object NoticeParser {
         val header = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(ctx, 6))
+            setPadding(0, 0, 0, dp(ctx, 4))
         }
         val titleText = TextView(ctx).apply {
-            text = "NOTICES // AGENDA HUB"
+            text = "NOTICES // HUB"
             setTextColor(host.accentTextColor)
-            textSize = 12f
+            textSize = 10.5f
             typeface = Typeface.MONOSPACE
+            setSingleLine(true)
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         header.addView(titleText)
@@ -496,7 +497,7 @@ object NoticeParser {
             setBackgroundColor(Theme.CARD)
             setPadding(dp(ctx, 10), dp(ctx, 6), dp(ctx, 10), dp(ctx, 6))
             val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                setMargins(0, 0, 0, dp(ctx, 8))
+                setMargins(0, 0, 0, dp(ctx, 6))
             }
             layoutParams = lp
         }
@@ -541,7 +542,7 @@ object NoticeParser {
             textSize = 10f
             typeface = Typeface.MONOSPACE
             setBackgroundColor(Theme.CARD)
-            setPadding(dp(ctx, 10), dp(ctx, 6), dp(ctx, 10), dp(ctx, 6))
+            setPadding(dp(ctx, 8), dp(ctx, 5), dp(ctx, 8), dp(ctx, 5))
             val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 setMargins(0, 0, 0, dp(ctx, 6))
             }
@@ -565,12 +566,18 @@ object NoticeParser {
         val scrollView = ScrollView(ctx).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(ctx, 220)
+                dp(ctx, 360)
             )
+            isNestedScrollingEnabled = true
+            setOnTouchListener { v, event ->
+                v.parent?.requestDisallowInterceptTouchEvent(true)
+                false
+            }
             setBackgroundColor(Theme.BG)
         }
         mainScrollContent = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, dp(ctx, 80))
         }
         scrollView.addView(mainScrollContent)
         root.addView(scrollView)
@@ -597,9 +604,14 @@ object NoticeParser {
             this.text = text
             setTextColor(color)
             setBackgroundColor(Theme.BTN)
-            textSize = 9.5f
+            textSize = 9f
             typeface = Typeface.MONOSPACE
-            setPadding(dp(ctx, 8), dp(ctx, 4), dp(ctx, 8), dp(ctx, 4))
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            includeFontPadding = false
+            setPadding(dp(ctx, 6), dp(ctx, 3), dp(ctx, 6), dp(ctx, 3))
             val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 setMargins(dp(ctx, 3), 0, 0, 0)
             }
@@ -611,8 +623,14 @@ object NoticeParser {
     private fun createTabButton(ctx: Context, label: String, weight: Float, onClick: () -> Unit): Button {
         return Button(ctx).apply {
             text = label
-            textSize = 9.5f
+            textSize = 9f
             typeface = Typeface.MONOSPACE
+            minWidth = 0
+            minimumWidth = 0
+            minHeight = 0
+            minimumHeight = 0
+            includeFontPadding = false
+            setPadding(dp(ctx, 4), dp(ctx, 5), dp(ctx, 4), dp(ctx, 5))
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, weight).apply {
                 setMargins(dp(ctx, 2), 0, dp(ctx, 2), 0)
             }
