@@ -475,7 +475,13 @@ object NoticeParser {
                     put("voice_enabled", voiceEnabled)
                     put("typewriter_speed_ms", typewriterSpeedMs)
                 }
-                atomicWriteText(File(PATH_CONFIG), json.toString(2))
+                val target = File(PATH_CONFIG)
+                target.parentFile?.mkdirs()
+                val tmp = File(target.parentFile, "${target.name}.tmp")
+                tmp.writeText(json.toString(2), Charsets.UTF_8)
+                if (!tmp.renameTo(target)) {
+                    target.writeText(json.toString(2), Charsets.UTF_8)
+                }
             } catch (_: Throwable) {}
         }
     }
