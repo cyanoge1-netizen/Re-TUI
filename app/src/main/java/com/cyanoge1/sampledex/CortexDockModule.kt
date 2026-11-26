@@ -109,6 +109,7 @@ class CortexDockModule : RetuiDexModule {
     private var typewriterCharIndex = 0
 
     // UI Widgets
+    private var parentScrollView: ScrollView? = null
     private var rootLayout: LinearLayout? = null
     private var dotStatus: TextView? = null
     private var lblStatus: TextView? = null
@@ -120,6 +121,18 @@ class CortexDockModule : RetuiDexModule {
     private var btnStop: Button? = null
     private var inputPrompt: EditText? = null
     private var btnVoiceToggle: Button? = null
+
+    private fun scrollToBottom(smooth: Boolean = true) {
+        val s = parentScrollView ?: (rootLayout?.parent as? ScrollView) ?: return
+        s.post {
+            if (smooth) {
+                val childH = s.getChildAt(0)?.height ?: 0
+                s.smoothScrollTo(0, childH)
+            } else {
+                s.fullScroll(View.FOCUS_DOWN)
+            }
+        }
+    }
 
     // Polling Runnables
     private val responsePoller = object : Runnable {
@@ -151,10 +164,22 @@ class CortexDockModule : RetuiDexModule {
                 val backlog = fullResponseText.length - typewriterCharIndex
                 val step = if (backlog > 80) 4 else if (backlog > 30) 2 else 1
                 typewriterCharIndex += step
+
+                // Follow cursor as text grows if user is near bottom
+                val s = parentScrollView ?: (rootLayout?.parent as? ScrollView)
+                if (s != null) {
+                    val childH = s.getChildAt(0)?.height ?: 0
+                    val maxScroll = (childH - s.height).coerceAtLeast(0)
+                    if (maxScroll - s.scrollY < dp(s.context, 160)) {
+                        s.post { s.fullScroll(View.FOCUS_DOWN) }
+                    }
+                }
+
                 mainHandler.postDelayed(this, TYPEWRITER_SPEED_MS)
             } else {
                 teletypeContent?.text = "> $fullResponseText ▌"
                 btnStop?.visibility = View.GONE
+                scrollToBottom(true)
             }
         }
     }
@@ -164,12 +189,18 @@ class CortexDockModule : RetuiDexModule {
         isDestroyed = false
         val ctx = host.context
 
+        parentScrollView = (container as? ScrollView) ?: (container.parent as? ScrollView)
+        parentScrollView?.apply {
+            isFillViewport = true
+            isVerticalScrollBarEnabled = true
+        }
+
         initTTS(ctx)
 
         val root = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Theme.BG)
-            setPadding(dp(ctx, 12), dp(ctx, 10), dp(ctx, 12), dp(ctx, 12))
+            setPadding(dp(ctx, 12), dp(ctx, 10), dp(ctx, 12), dp(ctx, 96))
         }
         rootLayout = root
 
@@ -343,6 +374,7 @@ class CortexDockModule : RetuiDexModule {
             textSize = 9.5f
             typeface = Typeface.MONOSPACE
             setLineSpacing(0f, 1.25f)
+            setHorizontallyScrolling(false)
             setOnClickListener {
                 // If clicked while typing, instantly reveal full text
                 if (typewriterCharIndex < fullResponseText.length) {
@@ -350,6 +382,7 @@ class CortexDockModule : RetuiDexModule {
                     typewriterCharIndex = fullResponseText.length
                     text = "> $fullResponseText ▌"
                     btnStop?.visibility = View.GONE
+                    scrollToBottom(true)
                 }
             }
         }
@@ -404,10 +437,18 @@ class CortexDockModule : RetuiDexModule {
             typeface = Typeface.MONOSPACE
             background = Theme.border(Theme.CARD, Theme.BTN_HOVER, 2)
             setPadding(dp(ctx, 10), dp(ctx, 8), dp(ctx, 10), dp(ctx, 8))
-            maxLines = 2
+            maxLines = 3
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 setMargins(0, 0, dp(ctx, 6), 0)
+            }
+            setOnFocusChangeListener { _, hasFocus ->
+                if (hasFocus) {
+                    mainHandler.postDelayed({ scrollToBottom(true) }, 300)
+                }
+            }
+            setOnClickListener {
+                mainHandler.postDelayed({ scrollToBottom(true) }, 300)
             }
         }
         inputRow.addView(inputPrompt)
@@ -547,6 +588,7 @@ class CortexDockModule : RetuiDexModule {
             isPollingResponse = true
             mainHandler.removeCallbacks(responsePoller)
             mainHandler.post(responsePoller)
+            scrollToBottom(true)
         } catch (e: Throwable) {
             teletypeContent?.text = "> Error dispatching request: ${e.message}"
             lblEngine?.text = "ERROR"
@@ -572,6 +614,7 @@ class CortexDockModule : RetuiDexModule {
             isPollingResponse = true
             mainHandler.removeCallbacks(responsePoller)
             mainHandler.post(responsePoller)
+            scrollToBottom(true)
         } catch (e: Throwable) {
             teletypeContent?.text = "> Error: ${e.message}"
         }
@@ -886,5 +929,7 @@ class CortexDockModule : RetuiDexModule {
         } catch (_: Throwable) {}
         tts = null
         hostRef = null
+        parentScrollView = null
+        rootLayout = null
     }
 }
