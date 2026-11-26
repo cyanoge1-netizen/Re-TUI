@@ -2718,10 +2718,10 @@ object NoticeParser {
         var selectedGender = BriefingConfig.voiceGender
         val btnVoiceToggle = Button(ctx).apply {
             text = "TTS VOICE: $selectedGender (Tap to toggle)"
-            setTextColor(Theme.ACCENT)
+            setTextColor(Theme.INFO)
             textSize = 9f
             typeface = Typeface.MONOSPACE
-            setBackgroundColor(Theme.SURFACE)
+            background = Theme.borderDrawable(Theme.BTN, Theme.INFO, 2)
             setPadding(dp(ctx, 8), dp(ctx, 6), dp(ctx, 8), dp(ctx, 6))
             setOnClickListener {
                 selectedGender = if (selectedGender == "MALE") "FEMALE" else "MALE"
