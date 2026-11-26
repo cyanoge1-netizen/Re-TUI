@@ -15,6 +15,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.AlarmClock
 import android.provider.CalendarContract
+import android.speech.tts.TextToSpeech
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
@@ -442,6 +443,207 @@ object NoticeParser {
     private var roomBadgeText = ""
     private var dateBadgeText = ""
 
+    // --- Modular Audio Briefing Subsystem ---
+    object BriefingConfig {
+        const val PATH_CONFIG = "/sdcard/Re-T-UI/dex-modules/schedule/config.json"
+        var groqApiKey: String = ""
+        var groqModel: String = "qwen/qwen3.8-27b"
+        var voiceEnabled: Boolean = true
+        var typewriterSpeedMs: Long = 25L
+
+        fun load() {
+            val f = File(PATH_CONFIG)
+            if (!f.isFile) return
+            try {
+                val json = JSONObject(f.readText())
+                groqApiKey = json.optString("groq_api_key", "").trim()
+                groqModel = json.optString("groq_model", "qwen/qwen3.8-27b").trim()
+                voiceEnabled = json.optBoolean("voice_enabled", true)
+                typewriterSpeedMs = json.optLong("typewriter_speed_ms", 25L)
+            } catch (_: Throwable) {}
+        }
+
+        fun save(key: String, model: String, voice: Boolean, speedMs: Long = 25L) {
+            groqApiKey = key.trim()
+            groqModel = if (model.trim().isNotEmpty()) model.trim() else "qwen/qwen3.8-27b"
+            voiceEnabled = voice
+            typewriterSpeedMs = speedMs
+            try {
+                val json = JSONObject().apply {
+                    put("groq_api_key", groqApiKey)
+                    put("groq_model", groqModel)
+                    put("voice_enabled", voiceEnabled)
+                    put("typewriter_speed_ms", typewriterSpeedMs)
+                }
+                atomicWriteText(File(PATH_CONFIG), json.toString(2))
+            } catch (_: Throwable) {}
+        }
+    }
+
+    object LocalBriefingGenerator {
+        fun generate(userName: String, nextEvent: EventItem?, recentNotices: List<String>, studentRecordSummary: String?): String {
+            val sb = StringBuilder()
+            sb.append("Briefing for $userName. ")
+
+            if (!studentRecordSummary.isNullOrEmpty()) {
+                sb.append("Recent evaluation marks on record: $studentRecordSummary. ")
+            }
+
+            if (nextEvent != null) {
+                val now = System.currentTimeMillis()
+                val evEnd = nextEvent.startMillis + (if (nextEvent.type == EventType.LAB || nextEvent.type == EventType.EXAM) 7200_000L else 3600_000L)
+                val isLive = now in nextEvent.startMillis until evEnd
+                val timeFmt = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(nextEvent.startMillis)
+                val roomStr = if (nextEvent.room.isNotEmpty()) " in ${nextEvent.room}" else ""
+                if (isLive) {
+                    sb.append("${nextEvent.title} is currently active$roomStr. ")
+                } else {
+                    sb.append("Next up is ${nextEvent.title} at $timeFmt$roomStr. ")
+                }
+            } else {
+                sb.append("No further classes scheduled for today. ")
+            }
+
+            val cancelNotice = recentNotices.firstOrNull {
+                val l = it.lowercase(Locale.ROOT)
+                l.contains("cancel") || l.contains("cancelled") || l.contains("off") || l.contains("hobe na")
+            }
+            if (cancelNotice != null) {
+                sb.append("Notice reports possible class cancellation.")
+            }
+
+            return sb.toString().trim()
+        }
+    }
+
+    object GroqSynthesizer {
+        fun synthesize(contextStr: String, studentName: String): String? {
+            val key = BriefingConfig.groqApiKey
+            if (key.isEmpty()) return null
+
+            try {
+                val url = java.net.URL("https://api.groq.com/openai/v1/chat/completions")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Authorization", "Bearer $key")
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.setRequestProperty("User-Agent", "ReTUI-Cyberdeck/1.0")
+                conn.connectTimeout = 4000
+                conn.readTimeout = 6000
+                conn.doOutput = true
+
+                val sysPrompt = "You are the executive AI cyberdeck dispatcher for student $studentName (CSE Department, Sylhet Engineering College). " +
+                        "Given the schedule and notice data, synthesize a clean, natural, spoken 2-sentence English briefing. " +
+                        "Prioritize: 1) Class cancellations or room changes today, 2) Next upcoming class/exam, 3) Recent evaluation/marks. " +
+                        "Speak directly, concisely, and naturally. Do not use markdown, emojis, asterisks, bullet points, or filler greetings."
+
+                val reqObj = JSONObject().apply {
+                    put("model", BriefingConfig.groqModel)
+                    put("temperature", 0.3)
+                    put("max_tokens", 100)
+                    val msgs = JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("role", "system")
+                            put("content", sysPrompt)
+                        })
+                        put(JSONObject().apply {
+                            put("role", "user")
+                            put("content", "Current context:\n$contextStr")
+                        })
+                    }
+                    put("messages", msgs)
+                }
+
+                java.io.OutputStreamWriter(conn.outputStream, "UTF-8").use { os ->
+                    os.write(reqObj.toString())
+                    os.flush()
+                }
+
+                val respCode = conn.responseCode
+                if (respCode == 200) {
+                    val respText = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    val respJson = JSONObject(respText)
+                    val choices = respJson.optJSONArray("choices")
+                    if (choices != null && choices.length() > 0) {
+                        val msgObj = choices.getJSONObject(0).optJSONObject("message")
+                        val content = msgObj?.optString("content", "")?.trim()
+                        if (!content.isNullOrEmpty()) return content
+                    }
+                }
+            } catch (_: Throwable) {}
+            return null
+        }
+    }
+
+    class AudioBriefingController(private val ctx: Context) : TextToSpeech.OnInitListener {
+        private var tts: TextToSpeech? = null
+        private var isReady = false
+        private var pendingSpeakText: String? = null
+
+        init {
+            try {
+                tts = TextToSpeech(ctx.applicationContext ?: ctx, this)
+            } catch (_: Throwable) {}
+        }
+
+        override fun onInit(status: Int) {
+            if (status == TextToSpeech.SUCCESS) {
+                isReady = true
+                try {
+                    tts?.language = Locale.US
+                } catch (_: Throwable) {}
+                val txt = pendingSpeakText
+                if (txt != null) {
+                    pendingSpeakText = null
+                    speak(txt)
+                }
+            }
+        }
+
+        fun speak(text: String) {
+            if (!BriefingConfig.voiceEnabled) return
+            if (!isReady || tts == null) {
+                pendingSpeakText = text
+                return
+            }
+            try {
+                tts?.stop()
+                val utteranceId = "briefing_" + System.currentTimeMillis()
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                    tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                } else {
+                    val map = HashMap<String, String>()
+                    map[TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID] = utteranceId
+                    @Suppress("DEPRECATION")
+                    tts?.speak(text, TextToSpeech.QUEUE_FLUSH, map)
+                }
+            } catch (_: Throwable) {}
+        }
+
+        fun stop() {
+            try {
+                tts?.stop()
+            } catch (_: Throwable) {}
+        }
+
+        fun shutdown() {
+            try {
+                tts?.stop()
+                tts?.shutdown()
+            } catch (_: Throwable) {}
+            tts = null
+            isReady = false
+        }
+    }
+
+    private var audioBriefingController: AudioBriefingController? = null
+    private var teletypeContainer: LinearLayout? = null
+    private var teletypeSubhead: TextView? = null
+    private var teletypeContent: TextView? = null
+    private var teletypeBtnStop: Button? = null
+    private var typewriterRunnable: Runnable? = null
+    private var isBriefingRunning = false
+
     // UI Elements
     private var rootLayout: LinearLayout? = null
     private var nextUpContainer: LinearLayout? = null
@@ -537,6 +739,15 @@ object NoticeParser {
         }
         header.addView(btnRefresh)
 
+        val btnBrief = createHeaderButton(ctx, "🔊 BRIEF", Theme.OK) {
+            triggerBriefing(ctx)
+        }
+        btnBrief.setOnLongClickListener {
+            showBriefingConfigDialog(ctx)
+            true
+        }
+        header.addView(btnBrief)
+
         val btnId = createHeaderButton(ctx, "ID", Theme.WARN) {
             showProfileConfigDialog(ctx)
         }
@@ -547,6 +758,70 @@ object NoticeParser {
         }
         header.addView(btnClose)
         root.addView(header)
+
+        // --- 1.5. Teletype Briefing Panel (Collapsible Cyberdeck Box) ---
+        teletypeContainer = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Theme.CARD)
+            setPadding(dp(ctx, 10), dp(ctx, 8), dp(ctx, 10), dp(ctx, 8))
+            background = Theme.borderDrawable(Theme.CARD, Theme.INFO, borderWidthPx = 2)
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 0, 0, dp(ctx, 6))
+            }
+            layoutParams = lp
+            visibility = View.GONE
+        }
+
+        val teleHeader = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        val teleTitle = TextView(ctx).apply {
+            text = "┌─ DISPATCH // AUDIO BRIEFING ───────────"
+            setTextColor(Theme.INFO)
+            textSize = 9f
+            typeface = Typeface.MONOSPACE
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        teleHeader.addView(teleTitle)
+
+        teletypeBtnStop = createHeaderButton(ctx, "STOP", Theme.ERR) {
+            stopBriefing()
+        }
+        teletypeBtnStop?.visibility = View.GONE
+        teleHeader.addView(teletypeBtnStop)
+
+        val teleBtnCfg = createHeaderButton(ctx, "CFG", Theme.WARN) {
+            showBriefingConfigDialog(ctx)
+        }
+        teleHeader.addView(teleBtnCfg)
+
+        val teleBtnClose = createHeaderButton(ctx, "✕", Theme.DIM) {
+            stopBriefing()
+            teletypeContainer?.visibility = View.GONE
+        }
+        teleHeader.addView(teleBtnClose)
+        teletypeContainer?.addView(teleHeader)
+
+        teletypeSubhead = TextView(ctx).apply {
+            text = "[READY]"
+            setTextColor(Theme.DIM)
+            textSize = 8f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, dp(ctx, 2), 0, dp(ctx, 4))
+        }
+        teletypeContainer?.addView(teletypeSubhead)
+
+        teletypeContent = TextView(ctx).apply {
+            text = "> Ready for audio dispatch."
+            setTextColor(Theme.OK)
+            textSize = 9.5f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, dp(ctx, 2), 0, dp(ctx, 4))
+        }
+        teletypeContainer?.addView(teletypeContent)
+        root.addView(teletypeContainer)
 
         // --- 2. Next Up Strip (Always visible countdown bar) ---
         nextUpContainer = LinearLayout(ctx).apply {
@@ -2208,6 +2483,173 @@ object NoticeParser {
         }
     }
 
+    private fun triggerBriefing(ctx: Context) {
+        BriefingConfig.load()
+        if (audioBriefingController == null) {
+            audioBriefingController = AudioBriefingController(ctx)
+        }
+
+        val container = teletypeContainer ?: return
+        container.visibility = View.VISIBLE
+        teletypeSubhead?.text = "CONNECTING TO DISPATCH MATRIX..."
+        teletypeContent?.text = "> Initializing voice & schedule intelligence... █"
+        teletypeBtnStop?.visibility = View.VISIBLE
+        isBriefingRunning = true
+
+        Thread {
+            val fNotices = File(PATH_NOTICES)
+            var studentRecSummary: String? = null
+            var studentName = "Shuvo"
+
+            val fProfile = File("/sdcard/Re-T-UI/dex-modules/schedule/profile.json")
+            if (fProfile.isFile) {
+                try {
+                    val pJson = JSONObject(fProfile.readText())
+                    studentName = pJson.optString("name", "Shuvo")
+                } catch (_: Throwable) {}
+            }
+
+            val recentMsgs = ArrayList<String>()
+            if (fNotices.isFile) {
+                try {
+                    val nJson = JSONObject(fNotices.readText())
+                    for (cat in listOf("official_notices", "class_schedule")) {
+                        val arr = nJson.optJSONObject(cat)?.optJSONArray("messages") ?: JSONArray()
+                        for (i in 0 until arr.length().coerceAtMost(3)) {
+                            val m = arr.getJSONObject(i)
+                            val txt = m.optString("text", "")
+                            val tstr = m.optString("time_str", "")
+                            val rec = m.optJSONObject("student_record")
+                            if (rec != null && studentRecSummary == null) {
+                                studentRecSummary = rec.optString("summary", "")
+                            }
+                            val recText = if (rec != null) " (Personal Mark: ${rec.optString("summary")})" else ""
+                            if (txt.isNotEmpty()) recentMsgs.add("[$tstr]: $txt$recText")
+                        }
+                    }
+                } catch (_: Throwable) {}
+            }
+
+            val contextStr = recentMsgs.joinToString("\n")
+            val nextEv = getNextUpcomingEvent()
+
+            var finalScript: String? = null
+            var engineUsed = "AI // ${BriefingConfig.groqModel}"
+            if (BriefingConfig.groqApiKey.isNotEmpty()) {
+                finalScript = GroqSynthesizer.synthesize(contextStr, studentName)
+            }
+
+            if (finalScript.isNullOrEmpty()) {
+                finalScript = LocalBriefingGenerator.generate(studentName, nextEv, recentMsgs, studentRecSummary)
+                engineUsed = "LOCAL RULE ENGINE // OFFLINE"
+            }
+
+            mainHandler.post {
+                if (isDestroyed || !isBriefingRunning) return@post
+                teletypeSubhead?.text = "[$engineUsed]"
+                startTypewriterEffect(finalScript)
+                if (BriefingConfig.voiceEnabled) {
+                    audioBriefingController?.speak(finalScript)
+                }
+            }
+        }.start()
+    }
+
+    private fun startTypewriterEffect(fullText: String) {
+        typewriterRunnable?.let { mainHandler.removeCallbacks(it) }
+        var charIndex = 0
+        val speed = BriefingConfig.typewriterSpeedMs.coerceAtLeast(10L)
+
+        typewriterRunnable = object : Runnable {
+            override fun run() {
+                if (isDestroyed || !isBriefingRunning) return
+                if (charIndex <= fullText.length) {
+                    val sub = fullText.substring(0, charIndex)
+                    teletypeContent?.text = "> $sub █"
+                    charIndex++
+                    mainHandler.postDelayed(this, speed)
+                } else {
+                    teletypeContent?.text = "> $fullText ▌"
+                    teletypeBtnStop?.visibility = View.GONE
+                    isBriefingRunning = false
+                }
+            }
+        }
+        mainHandler.post(typewriterRunnable!!)
+    }
+
+    private fun stopBriefing() {
+        isBriefingRunning = false
+        typewriterRunnable?.let { mainHandler.removeCallbacks(it) }
+        typewriterRunnable = null
+        audioBriefingController?.stop()
+        teletypeBtnStop?.visibility = View.GONE
+        val current = teletypeContent?.text?.toString() ?: ""
+        teletypeContent?.text = current.replace("█", "▌")
+    }
+
+    private fun showBriefingConfigDialog(ctx: Context) {
+        BriefingConfig.load()
+        val layout = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(ctx, 16), dp(ctx, 10), dp(ctx, 16), dp(ctx, 10))
+        }
+
+        val lblKey = TextView(ctx).apply {
+            text = "GROQ API KEY (leave empty for offline)"
+            setTextColor(Theme.DIM)
+            textSize = 8.5f
+            typeface = Typeface.MONOSPACE
+        }
+        layout.addView(lblKey)
+
+        val inputKey = EditText(ctx).apply {
+            hint = "gsk_..."
+            setText(BriefingConfig.groqApiKey)
+            setTextColor(Theme.TEXT)
+            setHintTextColor(Theme.DIM)
+            typeface = Typeface.MONOSPACE
+            textSize = 9.5f
+            setPadding(0, dp(ctx, 4), 0, dp(ctx, 8))
+        }
+        layout.addView(inputKey)
+
+        val lblModel = TextView(ctx).apply {
+            text = "GROQ MODEL"
+            setTextColor(Theme.DIM)
+            textSize = 8.5f
+            typeface = Typeface.MONOSPACE
+        }
+        layout.addView(lblModel)
+
+        val inputModel = EditText(ctx).apply {
+            hint = "e.g. qwen/qwen3.8-27b"
+            setText(BriefingConfig.groqModel)
+            setTextColor(Theme.TEXT)
+            setHintTextColor(Theme.DIM)
+            typeface = Typeface.MONOSPACE
+            textSize = 9.5f
+            setPadding(0, dp(ctx, 4), 0, dp(ctx, 8))
+        }
+        layout.addView(inputModel)
+
+        AlertDialog.Builder(ctx)
+            .setTitle("Briefing Configuration")
+            .setView(layout)
+            .setPositiveButton("Save") { _, _ ->
+                val key = inputKey.text.toString().trim()
+                val model = inputModel.text.toString().trim()
+                BriefingConfig.save(key, model, BriefingConfig.voiceEnabled)
+                showToast(ctx, "Briefing config saved.")
+            }
+            .setNeutralButton(if (BriefingConfig.voiceEnabled) "Voice: ON" else "Voice: OFF") { _, _ ->
+                BriefingConfig.save(inputKey.text.toString().trim(), inputModel.text.toString().trim(), !BriefingConfig.voiceEnabled)
+                showToast(ctx, "Voice toggled to ${if (BriefingConfig.voiceEnabled) "ON" else "OFF"}")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     private fun showToast(ctx: Context, msg: String) {
         mainHandler.post {
             Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
@@ -2216,6 +2658,9 @@ object NoticeParser {
 
     override fun onDestroy() {
         isDestroyed = true
+        stopBriefing()
+        audioBriefingController?.shutdown()
+        audioBriefingController = null
         mainHandler.removeCallbacks(tickerRunnable)
         mainHandler.removeCallbacksAndMessages(null)
         hostRef = null
