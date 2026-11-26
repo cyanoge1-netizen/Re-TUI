@@ -86,6 +86,38 @@ class ScheduleModule : RetuiDexModule {
 object NoticeParser {
     enum class Confidence { SURE, GUESS, NONE }
 
+    enum class TemporalStatus {
+        LIVE,      // Ongoing (within 90 mins of start)
+        TODAY,     // Scheduled for later today
+        UPCOMING,  // Tomorrow or later
+        PAST,      // Date has passed
+        NONE       // No date attached
+    }
+
+    fun getTemporalStatus(eventMillis: Long?, nowMillis: Long = System.currentTimeMillis()): TemporalStatus {
+        if (eventMillis == null) return TemporalStatus.NONE
+        val now = Calendar.getInstance().apply { timeInMillis = nowMillis }
+        val ev = Calendar.getInstance().apply { timeInMillis = eventMillis }
+
+        val isSameDay = ev.get(Calendar.YEAR) == now.get(Calendar.YEAR) &&
+                ev.get(Calendar.DAY_OF_YEAR) == now.get(Calendar.DAY_OF_YEAR)
+
+        if (isSameDay) {
+            val diffMins = (eventMillis - nowMillis) / (60 * 1000)
+            return when {
+                diffMins in -90..15 -> TemporalStatus.LIVE
+                eventMillis < nowMillis -> TemporalStatus.PAST
+                else -> TemporalStatus.TODAY
+            }
+        }
+
+        return if (eventMillis < nowMillis) {
+            TemporalStatus.PAST
+        } else {
+            TemporalStatus.UPCOMING
+        }
+    }
+
     data class ParsedNotice(
         val type: EventType,
         val typeConfidence: Confidence,
@@ -245,11 +277,18 @@ object NoticeParser {
                     "jul" -> 6; "aug" -> 7; "sep" -> 8; "oct" -> 9; "nov" -> 10; "dec" -> 11
                     else -> 0
                 }
+                val baseYear = baseCal.get(Calendar.YEAR)
+                val baseMonth = baseCal.get(Calendar.MONTH)
+                var year = baseYear
+                if (month < baseMonth - 6) {
+                    year = baseYear + 1
+                } else if (month > baseMonth + 6) {
+                    year = baseYear - 1
+                }
                 targetCal = Calendar.getInstance().apply {
+                    set(Calendar.YEAR, year)
                     set(Calendar.MONTH, month)
                     set(Calendar.DAY_OF_MONTH, day)
-                    // If month is in past compared to current year, push to next year
-                    if (before(now)) add(Calendar.YEAR, 1)
                 }
                 conf = Confidence.SURE
             }
@@ -263,13 +302,19 @@ object NoticeParser {
                 val day = ndMatch.groupValues[1].toIntOrNull() ?: 1
                 val month = (ndMatch.groupValues[2].toIntOrNull() ?: 1) - 1
                 val yr = ndMatch.groupValues[3].toIntOrNull()
+                val baseYear = baseCal.get(Calendar.YEAR)
+                val baseMonth = baseCal.get(Calendar.MONTH)
+                var year = yr ?: baseYear
+                if (yr == null) {
+                    if (month < baseMonth - 6) year = baseYear + 1
+                    else if (month > baseMonth + 6) year = baseYear - 1
+                } else if (year < 100) {
+                    year += 2000
+                }
                 targetCal = Calendar.getInstance().apply {
-                    if (yr != null) {
-                        set(Calendar.YEAR, if (yr < 100) 2000 + yr else yr)
-                    }
+                    set(Calendar.YEAR, year)
                     set(Calendar.MONTH, month)
                     set(Calendar.DAY_OF_MONTH, day)
-                    if (yr == null && before(now)) add(Calendar.YEAR, 1)
                 }
                 conf = Confidence.SURE
             }
@@ -692,12 +737,16 @@ object NoticeParser {
         }
         container.visibility = View.VISIBLE
 
-        val typeColor = Theme.typeColor(nextEvent.type)
+        val now = System.currentTimeMillis()
+        val evEnd = if (nextEvent.endMillis > nextEvent.startMillis) nextEvent.endMillis else nextEvent.startMillis + 3600_000L
+        val isOngoing = now in nextEvent.startMillis until evEnd
+
+        val typeColor = if (isOngoing) Theme.INFO else Theme.typeColor(nextEvent.type)
         container.background = Theme.borderDrawable(Theme.CARD, typeColor, borderWidthPx = 4)
 
         val row1 = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
         val lblTag = TextView(ctx).apply {
-            text = "▌NEXT UP · ${nextEvent.type.name}"
+            text = if (isOngoing) "⚡ LIVE NOW · ${nextEvent.type.name}" else "▌NEXT UP · ${nextEvent.type.name}"
             setTextColor(typeColor)
             textSize = 9.5f
             typeface = Typeface.MONOSPACE
@@ -705,12 +754,11 @@ object NoticeParser {
         }
         row1.addView(lblTag)
 
-        val now = System.currentTimeMillis()
         val diff = nextEvent.startMillis - now
-        val countdownStr = formatCountdown(diff)
+        val countdownStr = if (isOngoing) "ONGOING" else formatCountdown(diff)
         val lblCountdown = TextView(ctx).apply {
             text = countdownStr
-            setTextColor(if (nextEvent.type == EventType.EXAM && diff in 1..21_600_000L) Theme.ERR else Theme.DIM)
+            setTextColor(if (isOngoing) Theme.INFO else if (nextEvent.type == EventType.EXAM && diff in 1..21_600_000L) Theme.ERR else Theme.DIM)
             textSize = 9.5f
             typeface = Typeface.MONOSPACE
         }
@@ -802,13 +850,24 @@ object NoticeParser {
             val isNew = ts > lastSeenTs
             val isScheduled = scheduledNoticeIds.contains(nId)
             val parsed = NoticeParser.parse(rawText, ts)
+            val temporal = NoticeParser.getTemporalStatus(parsed.dateMillis)
+            val isPastEvent = temporal == NoticeParser.TemporalStatus.PAST
+
+            val cardBg = if (isScheduled || isPastEvent) Theme.CARD_DIM else Theme.CARD
+            val cardBorderColor = when {
+                isScheduled || isPastEvent -> Theme.DIM
+                temporal == NoticeParser.TemporalStatus.LIVE -> Theme.INFO
+                temporal == NoticeParser.TemporalStatus.TODAY -> Theme.WARN
+                else -> Theme.typeColor(parsed.type)
+            }
+            val cardBorderWidth = if (isPastEvent || isScheduled) 2 else 3
 
             val card = LinearLayout(ctx).apply {
                 orientation = LinearLayout.VERTICAL
-                setBackgroundColor(if (isScheduled) Theme.CARD_DIM else Theme.CARD)
+                setBackgroundColor(cardBg)
                 setPadding(dp(ctx, 10), dp(ctx, 8), dp(ctx, 10), dp(ctx, 8))
-                val typeColor = Theme.typeColor(parsed.type)
-                background = Theme.borderDrawable(if (isScheduled) Theme.CARD_DIM else Theme.CARD, typeColor, borderWidthPx = 3)
+                background = Theme.borderDrawable(cardBg, cardBorderColor, borderWidthPx = cardBorderWidth)
+                if (isPastEvent || isScheduled) alpha = 0.78f
                 val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                     setMargins(0, 0, 0, dp(ctx, 8))
                 }
@@ -828,6 +887,18 @@ object NoticeParser {
                 when {
                     isScheduled -> {
                         text = "✓ SCHEDULED"
+                        setTextColor(Theme.DIM)
+                    }
+                    temporal == NoticeParser.TemporalStatus.LIVE -> {
+                        text = "⚡ LIVE NOW"
+                        setTextColor(Theme.INFO)
+                    }
+                    temporal == NoticeParser.TemporalStatus.TODAY -> {
+                        text = "● TODAY"
+                        setTextColor(Theme.WARN)
+                    }
+                    isPastEvent -> {
+                        text = "✕ PASSED"
                         setTextColor(Theme.DIM)
                     }
                     isNew -> {
@@ -852,7 +923,7 @@ object NoticeParser {
             // Notice Body
             val lblBody = TextView(ctx).apply {
                 text = rawText
-                setTextColor(if (isScheduled) Theme.DIM else Theme.TEXT)
+                setTextColor(if (isScheduled || isPastEvent) Theme.DIM else Theme.TEXT)
                 textSize = 9.5f
                 typeface = Typeface.MONOSPACE
                 setPadding(0, dp(ctx, 4), 0, dp(ctx, 4))
@@ -865,17 +936,31 @@ object NoticeParser {
                 setPadding(0, dp(ctx, 2), 0, dp(ctx, 4))
             }
 
-            chipRow.addView(createChipView(ctx, "[${parsed.type.name}]", Theme.typeColor(parsed.type)))
+            val typeColor = if (isPastEvent) Theme.DIM else Theme.typeColor(parsed.type)
+            chipRow.addView(createChipView(ctx, "[${parsed.type.name}]", typeColor))
             if (parsed.code.isNotEmpty()) {
-                chipRow.addView(createChipView(ctx, "[${parsed.code}]", Theme.INFO))
+                val codeColor = if (isPastEvent) Theme.DIM else Theme.INFO
+                chipRow.addView(createChipView(ctx, "[${parsed.code}]", codeColor))
             }
             if (parsed.dateMillis != null) {
-                val dtChipStr = SimpleDateFormat("dd MMM hh:mm a", Locale.getDefault()).format(parsed.dateMillis)
-                chipRow.addView(createChipView(ctx, "[$dtChipStr]", Theme.TEXT))
+                val sdfTime = SimpleDateFormat("hh:mm a", Locale.getDefault())
+                val dtChipStr = when (temporal) {
+                    NoticeParser.TemporalStatus.LIVE -> "[LIVE · ${sdfTime.format(parsed.dateMillis)}]"
+                    NoticeParser.TemporalStatus.TODAY -> "[TODAY · ${sdfTime.format(parsed.dateMillis)}]"
+                    NoticeParser.TemporalStatus.PAST -> "[PAST · ${SimpleDateFormat("dd MMM", Locale.getDefault()).format(parsed.dateMillis)}]"
+                    else -> "[${SimpleDateFormat("dd MMM hh:mm a", Locale.getDefault()).format(parsed.dateMillis)}]"
+                }
+                val dtColor = when (temporal) {
+                    NoticeParser.TemporalStatus.LIVE -> Theme.INFO
+                    NoticeParser.TemporalStatus.TODAY -> Theme.WARN
+                    NoticeParser.TemporalStatus.PAST -> Theme.DIM
+                    else -> Theme.TEXT
+                }
+                chipRow.addView(createChipView(ctx, dtChipStr, dtColor))
             }
             if (parsed.room.isNotEmpty()) {
                 val roomLabel = if (parsed.roomConfidence == NoticeParser.Confidence.GUESS) "${parsed.room} ?" else parsed.room
-                val roomCol = if (parsed.roomConfidence == NoticeParser.Confidence.GUESS) Theme.WARN else Theme.TEXT
+                val roomCol = if (isPastEvent) Theme.DIM else if (parsed.roomConfidence == NoticeParser.Confidence.GUESS) Theme.WARN else Theme.TEXT
                 chipRow.addView(createChipView(ctx, "[$roomLabel]", roomCol))
             }
             card.addView(chipRow)
@@ -1143,12 +1228,25 @@ object NoticeParser {
     }
 
     private fun renderAgendaCard(ctx: Context, ev: EventItem, isPast: Boolean = false) {
-        val typeColor = Theme.typeColor(ev.type)
+        val nowMillis = System.currentTimeMillis()
+        val evEnd = if (ev.endMillis > ev.startMillis) ev.endMillis else ev.startMillis + 3600_000L
+        val isExpiredToday = !isPast && (nowMillis >= evEnd)
+        val isLiveNow = !isPast && !isExpiredToday && (nowMillis in ev.startMillis until evEnd)
+        val isMuted = isPast || isExpiredToday
+
+        val typeColor = when {
+            isMuted -> Theme.DIM
+            isLiveNow -> Theme.INFO
+            else -> Theme.typeColor(ev.type)
+        }
+        val cardBg = if (isMuted) Theme.CARD_DIM else Theme.CARD
+
         val card = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(if (isPast) Theme.CARD_DIM else Theme.CARD)
+            setBackgroundColor(cardBg)
             setPadding(dp(ctx, 10), dp(ctx, 6), dp(ctx, 10), dp(ctx, 6))
-            background = Theme.borderDrawable(if (isPast) Theme.CARD_DIM else Theme.CARD, if (isPast) Theme.DIM else typeColor, borderWidthPx = 3)
+            background = Theme.borderDrawable(cardBg, typeColor, borderWidthPx = if (isMuted) 2 else 3)
+            if (isMuted) alpha = 0.78f
             val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                 setMargins(0, 0, 0, dp(ctx, 6))
             }
@@ -1167,18 +1265,28 @@ object NoticeParser {
         val sdfTime = SimpleDateFormat("hh:mm a", Locale.getDefault())
         val lblTimeType = TextView(ctx).apply {
             val repeatTag = if (ev.isWeeklyRepeat) " ↻ weekly" else ""
-            text = "▌${sdfTime.format(ev.startMillis)} · ${ev.type.name}$repeatTag"
-            setTextColor(if (isPast) Theme.DIM else typeColor)
+            val statusPrefix = when {
+                isLiveNow -> "⚡ "
+                isExpiredToday -> "✓ "
+                else -> "▌"
+            }
+            text = "$statusPrefix${sdfTime.format(ev.startMillis)} · ${ev.type.name}$repeatTag"
+            setTextColor(typeColor)
             textSize = 9.5f
             typeface = Typeface.MONOSPACE
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         row1.addView(lblTimeType)
 
-        val diff = ev.startMillis - System.currentTimeMillis()
+        val diff = ev.startMillis - nowMillis
         val lblDiff = TextView(ctx).apply {
-            text = if (isPast) "PAST" else "in " + formatCountdown(diff)
-            setTextColor(Theme.DIM)
+            text = when {
+                isPast -> "PAST"
+                isExpiredToday -> "DONE"
+                isLiveNow -> "LIVE NOW"
+                else -> "in " + formatCountdown(diff)
+            }
+            setTextColor(if (isLiveNow) Theme.INFO else Theme.DIM)
             textSize = 9f
             typeface = Typeface.MONOSPACE
         }
@@ -1189,7 +1297,7 @@ object NoticeParser {
             val codeStr = if (ev.code.isNotEmpty()) "${ev.code} · " else ""
             val roomStr = if (ev.room.isNotEmpty()) " · ${ev.room}" else ""
             text = "▌$codeStr${ev.title}$roomStr"
-            setTextColor(if (isPast) Theme.DIM else Theme.TEXT)
+            setTextColor(if (isMuted) Theme.DIM else Theme.TEXT)
             textSize = 10f
             typeface = Typeface.MONOSPACE
         }
@@ -1858,7 +1966,13 @@ object NoticeParser {
 
     private fun getNextUpcomingEvent(): EventItem? {
         val now = System.currentTimeMillis()
-        return loadEventsList()
+        val list = loadEventsList()
+        val ongoing = list.firstOrNull { ev ->
+            val end = if (ev.endMillis > ev.startMillis) ev.endMillis else ev.startMillis + 3600_000L
+            now in ev.startMillis until end
+        }
+        if (ongoing != null) return ongoing
+        return list
             .filter { it.startMillis > now }
             .minByOrNull { it.startMillis }
     }
