@@ -234,6 +234,21 @@ class CortexDockModule : RetuiDexModule {
         }
         header.addView(btnVoiceToggle)
 
+        val btnConfig = Button(ctx).apply {
+            text = "[ CFG ]"
+            setTextColor(Theme.DIM)
+            textSize = 8.5f
+            typeface = Typeface.MONOSPACE
+            background = Theme.border(Theme.BTN, Theme.DIM, 1)
+            setPadding(dp(ctx, 6), dp(ctx, 2), dp(ctx, 6), dp(ctx, 2))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(dp(ctx, 4), 0, dp(ctx, 4), 0) }
+            setOnClickListener { showConfigDialog(ctx) }
+        }
+        header.addView(btnConfig)
+
         val btnClose = Button(ctx).apply {
             text = "[ ✕ ]"
             setTextColor(Theme.DIM)
@@ -756,6 +771,85 @@ class CortexDockModule : RetuiDexModule {
                 card.addView(btnRow)
                 container.addView(card)
             }
+        } catch (_: Throwable) {}
+    }
+
+    private fun showConfigDialog(ctx: Context) {
+        val layout = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(ctx, 16), dp(ctx, 10), dp(ctx, 16), dp(ctx, 10))
+        }
+
+        val lblKey = TextView(ctx).apply {
+            text = "GROQ API KEY (leave empty to keep current)"
+            setTextColor(Theme.DIM)
+            textSize = 8.5f
+            typeface = Typeface.MONOSPACE
+        }
+        layout.addView(lblKey)
+
+        val inputKey = EditText(ctx).apply {
+            hint = "gsk_..."
+            setTextColor(Theme.TEXT)
+            setHintTextColor(Theme.DIM)
+            typeface = Typeface.MONOSPACE
+            textSize = 9.5f
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setPadding(0, dp(ctx, 4), 0, dp(ctx, 8))
+        }
+        layout.addView(inputKey)
+
+        val lblModel = TextView(ctx).apply {
+            text = "GROQ MODEL"
+            setTextColor(Theme.DIM)
+            textSize = 8.5f
+            typeface = Typeface.MONOSPACE
+        }
+        layout.addView(lblModel)
+
+        val inputModel = EditText(ctx).apply {
+            hint = "e.g. qwen/qwen3.8-27b"
+            setText("qwen/qwen3.8-27b")
+            setTextColor(Theme.TEXT)
+            setHintTextColor(Theme.DIM)
+            typeface = Typeface.MONOSPACE
+            textSize = 9.5f
+            setPadding(0, dp(ctx, 4), 0, dp(ctx, 8))
+        }
+        layout.addView(inputModel)
+
+        AlertDialog.Builder(ctx)
+            .setTitle("CORTEX // CONFIGURATION")
+            .setView(layout)
+            .setPositiveButton("Save") { _, _ ->
+                val key = inputKey.text.toString().trim()
+                val model = inputModel.text.toString().trim()
+                sendConfigUpdate(key, model)
+                Toast.makeText(ctx, "Configuration dispatched to Cortex daemon.", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun sendConfigUpdate(apiKey: String, model: String) {
+        currentRequestId = "req_cfg_" + System.currentTimeMillis()
+        val reqObj = JSONObject().apply {
+            put("id", currentRequestId)
+            put("ts", System.currentTimeMillis())
+            put("type", "config")
+            put("text", "")
+            put("config", JSONObject().apply {
+                if (apiKey.isNotEmpty()) put("groq_api_key", apiKey)
+                if (model.isNotEmpty()) put("groq_model", model)
+            })
+            put("approve", JSONObject.NULL)
+        }
+
+        try {
+            atomicWriteText(File(PATH_REQUEST), reqObj.toString(2))
+            isPollingResponse = true
+            mainHandler.removeCallbacks(responsePoller)
+            mainHandler.post(responsePoller)
         } catch (_: Throwable) {}
     }
 
