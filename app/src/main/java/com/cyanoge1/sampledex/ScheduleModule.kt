@@ -320,15 +320,20 @@ object NoticeParser {
             }
         }
 
-        if (targetCal == null) {
-            targetCal = (baseCal.clone() as Calendar).apply { add(Calendar.DAY_OF_YEAR, 1) }
-            conf = Confidence.GUESS
-        }
-
         // Extract Time: "10:30 AM", "10.30am", "5 PM", "14:00"
         val timeRegex = Regex("\\b(\\d{1,2})(?:[:.](\\d{2}))?\\s*(am|pm)?\\b", RegexOption.IGNORE_CASE)
         val tMatch = timeRegex.findAll(text).firstOrNull { m ->
             m.groupValues[3].isNotEmpty() || m.groupValues[2].isNotEmpty()
+        }
+
+        // If neither date nor time was extracted from text, this notice has no event date
+        if (targetCal == null && tMatch == null) {
+            return null
+        }
+
+        if (targetCal == null) {
+            targetCal = baseCal.clone() as Calendar
+            conf = Confidence.GUESS
         }
 
         if (tMatch != null) {
@@ -343,11 +348,11 @@ object NoticeParser {
             targetCal.set(Calendar.SECOND, 0)
             targetCal.set(Calendar.MILLISECOND, 0)
         } else {
-            // Default 10:30 AM
+            // Default 10:30 AM on target date
             targetCal.set(Calendar.HOUR_OF_DAY, 10)
             targetCal.set(Calendar.MINUTE, 30)
             targetCal.set(Calendar.SECOND, 0)
-            conf = Confidence.GUESS
+            targetCal.set(Calendar.MILLISECOND, 0)
         }
 
         return Pair(targetCal.timeInMillis, conf)
@@ -852,15 +857,16 @@ object NoticeParser {
             val parsed = NoticeParser.parse(rawText, ts)
             val temporal = NoticeParser.getTemporalStatus(parsed.dateMillis)
             val isPastEvent = temporal == NoticeParser.TemporalStatus.PAST
+            val isGeneralNotice = parsed.type == EventType.EVENT && parsed.dateMillis == null
 
             val cardBg = if (isScheduled || isPastEvent) Theme.CARD_DIM else Theme.CARD
             val cardBorderColor = when {
-                isScheduled || isPastEvent -> Theme.DIM
+                isScheduled || isPastEvent || isGeneralNotice -> Theme.DIM
                 temporal == NoticeParser.TemporalStatus.LIVE -> Theme.INFO
                 temporal == NoticeParser.TemporalStatus.TODAY -> Theme.WARN
                 else -> Theme.typeColor(parsed.type)
             }
-            val cardBorderWidth = if (isPastEvent || isScheduled) 2 else 3
+            val cardBorderWidth = if (isPastEvent || isScheduled || isGeneralNotice) 2 else 3
 
             val card = LinearLayout(ctx).apply {
                 orientation = LinearLayout.VERTICAL
@@ -936,8 +942,13 @@ object NoticeParser {
                 setPadding(0, dp(ctx, 2), 0, dp(ctx, 4))
             }
 
-            val typeColor = if (isPastEvent) Theme.DIM else Theme.typeColor(parsed.type)
-            chipRow.addView(createChipView(ctx, "[${parsed.type.name}]", typeColor))
+            val typeLabel = if (parsed.type == EventType.EVENT) {
+                if (parsed.dateMillis != null) "[EVENT]" else "[NOTICE]"
+            } else {
+                "[${parsed.type.name}]"
+            }
+            val typeColor = if (isPastEvent || isGeneralNotice) Theme.DIM else Theme.typeColor(parsed.type)
+            chipRow.addView(createChipView(ctx, typeLabel, typeColor))
             if (parsed.code.isNotEmpty()) {
                 val codeColor = if (isPastEvent) Theme.DIM else Theme.INFO
                 chipRow.addView(createChipView(ctx, "[${parsed.code}]", codeColor))
