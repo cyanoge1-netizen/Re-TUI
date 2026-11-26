@@ -45,9 +45,9 @@ class CortexDockModule : RetuiDexModule {
         const val PATH_EVENTS = "$CORTEX_DIR/events.json"
 
         const val HEARTBEAT_TIMEOUT_MS = 15000L
-        const val POLL_INTERVAL_MS = 300L
+        const val POLL_INTERVAL_MS = 120L
         const val WATCHDOG_INTERVAL_MS = 3000L
-        const val TYPEWRITER_SPEED_MS = 25L
+        const val TYPEWRITER_SPEED_MS = 8L
 
         fun dp(ctx: Context, v: Int): Int =
             TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), ctx.resources.displayMetrics).toInt()
@@ -96,7 +96,7 @@ class CortexDockModule : RetuiDexModule {
     // TTS Subsystem
     private var tts: TextToSpeech? = null
     private var isTtsReady = false
-    private var isVoiceEnabled = true
+    private var voiceMode = "AUTO" // AUTO, BANGLA, EN-MALE, MUTE
     private var voiceGender = "MALE"
     private var pendingSpeakText: String? = null
 
@@ -148,7 +148,9 @@ class CortexDockModule : RetuiDexModule {
             if (typewriterCharIndex <= fullResponseText.length) {
                 val sub = fullResponseText.substring(0, typewriterCharIndex)
                 teletypeContent?.text = "> $sub █"
-                typewriterCharIndex++
+                val backlog = fullResponseText.length - typewriterCharIndex
+                val step = if (backlog > 80) 4 else if (backlog > 30) 2 else 1
+                typewriterCharIndex += step
                 mainHandler.postDelayed(this, TYPEWRITER_SPEED_MS)
             } else {
                 teletypeContent?.text = "> $fullResponseText ▌"
@@ -210,26 +212,32 @@ class CortexDockModule : RetuiDexModule {
         header.addView(spacer)
 
         btnVoiceToggle = Button(ctx).apply {
-            text = if (isVoiceEnabled) "[ 🔊 MALE ]" else "[ 🔇 MUTE ]"
+            text = when (voiceMode) {
+                "AUTO" -> "[ 🔊 AUTO-BN ]"
+                "BANGLA" -> "[ 🔊 BANGLA ]"
+                "EN-MALE" -> "[ 🔊 EN-MALE ]"
+                else -> "[ 🔇 MUTE ]"
+            }
             setTextColor(Theme.INFO)
-            textSize = 8.5f
+            textSize = 8f
             typeface = Typeface.MONOSPACE
             background = Theme.border(Theme.BTN, Theme.INFO, 1)
             setPadding(dp(ctx, 6), dp(ctx, 2), dp(ctx, 6), dp(ctx, 2))
             setOnClickListener {
-                if (!isVoiceEnabled) {
-                    isVoiceEnabled = true
-                    voiceGender = "MALE"
-                    text = "[ 🔊 MALE ]"
-                } else if (voiceGender == "MALE") {
-                    voiceGender = "FEMALE"
-                    text = "[ 🔊 FEMALE ]"
-                } else {
-                    isVoiceEnabled = false
-                    text = "[ 🔇 MUTE ]"
-                    stopSpeech()
+                voiceMode = when (voiceMode) {
+                    "AUTO" -> "BANGLA"
+                    "BANGLA" -> "EN-MALE"
+                    "EN-MALE" -> "MUTE"
+                    else -> "AUTO"
                 }
-                applyVoiceSettings()
+                text = when (voiceMode) {
+                    "AUTO" -> "[ 🔊 AUTO-BN ]"
+                    "BANGLA" -> "[ 🔊 BANGLA ]"
+                    "EN-MALE" -> "[ 🔊 EN-MALE ]"
+                    else -> "[ 🔇 MUTE ]"
+                }
+                if (voiceMode == "MUTE") stopSpeech()
+                applyVoiceSettings(fullResponseText)
             }
         }
         header.addView(btnVoiceToggle)
@@ -447,41 +455,56 @@ class CortexDockModule : RetuiDexModule {
         } catch (_: Throwable) {}
     }
 
-    private fun applyVoiceSettings() {
+    private fun applyVoiceSettings(text: String = "") {
         val t = tts ?: return
         try {
-            t.language = Locale.US
-            val voices = t.voices
-            if (voices != null) {
-                val preferMale = voiceGender.equals("MALE", ignoreCase = true)
-                val selectedVoice = voices.firstOrNull { v ->
-                    val n = v.name.lowercase(Locale.ROOT)
-                    val isEn = v.locale.language.startsWith("en")
-                    if (preferMale) {
-                        isEn && (n.contains("male") || n.contains("#m") || n.contains("-m-") || n.contains("guy"))
-                    } else {
-                        isEn && (n.contains("female") || n.contains("#f") || n.contains("-f-"))
-                    }
-                }
-                if (selectedVoice != null) t.voice = selectedVoice
-            }
-        } catch (_: Throwable) {}
+            val hasBangla = text.any { it in '\u0980'..'\u09FF' }
+            val useBangla = (voiceMode == "AUTO" && hasBangla) || voiceMode == "BANGLA"
 
-        try {
-            val isMale = voiceGender.equals("MALE", ignoreCase = true)
-            t.setPitch(if (isMale) 0.82f else 1.0f)
-            t.setSpeechRate(1.05f)
+            if (useBangla) {
+                val bnLocale = Locale("bn", "BD")
+                val res = t.setLanguage(bnLocale)
+                if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    t.setLanguage(Locale("bn", "IN"))
+                }
+                val voices = t.voices
+                if (voices != null) {
+                    val bnVoice = voices.firstOrNull { it.locale.language.startsWith("bn") }
+                    if (bnVoice != null) t.voice = bnVoice
+                }
+                t.setPitch(1.0f)
+                t.setSpeechRate(1.05f)
+            } else {
+                t.language = Locale.US
+                val voices = t.voices
+                if (voices != null) {
+                    val preferMale = voiceGender.equals("MALE", ignoreCase = true)
+                    val selectedVoice = voices.firstOrNull { v ->
+                        val n = v.name.lowercase(Locale.ROOT)
+                        val isEn = v.locale.language.startsWith("en")
+                        if (preferMale) {
+                            isEn && (n.contains("male") || n.contains("#m") || n.contains("-m-") || n.contains("guy"))
+                        } else {
+                            isEn && (n.contains("female") || n.contains("#f") || n.contains("-f-"))
+                        }
+                    }
+                    if (selectedVoice != null) t.voice = selectedVoice
+                }
+                val isMale = voiceGender.equals("MALE", ignoreCase = true)
+                t.setPitch(if (isMale) 0.82f else 1.0f)
+                t.setSpeechRate(1.05f)
+            }
         } catch (_: Throwable) {}
     }
 
     private fun speak(text: String) {
-        if (!isVoiceEnabled || text.isEmpty()) return
+        if (voiceMode == "MUTE" || text.isEmpty()) return
         if (!isTtsReady || tts == null) {
             pendingSpeakText = text
             return
         }
         try {
-            applyVoiceSettings()
+            applyVoiceSettings(text)
             tts?.stop()
             val uId = "cortex_utt_" + System.currentTimeMillis()
             tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, uId)
