@@ -449,6 +449,7 @@ object NoticeParser {
         var groqApiKey: String = ""
         var groqModel: String = "qwen/qwen3.8-27b"
         var voiceEnabled: Boolean = true
+        var voiceGender: String = "MALE"
         var typewriterSpeedMs: Long = 25L
 
         fun load() {
@@ -459,20 +460,23 @@ object NoticeParser {
                 groqApiKey = json.optString("groq_api_key", "").trim()
                 groqModel = json.optString("groq_model", "qwen/qwen3.8-27b").trim()
                 voiceEnabled = json.optBoolean("voice_enabled", true)
+                voiceGender = json.optString("voice_gender", "MALE").uppercase(Locale.ROOT)
                 typewriterSpeedMs = json.optLong("typewriter_speed_ms", 25L)
             } catch (_: Throwable) {}
         }
 
-        fun save(key: String, model: String, voice: Boolean, speedMs: Long = 25L) {
+        fun save(key: String, model: String, voice: Boolean, gender: String = voiceGender, speedMs: Long = 25L) {
             groqApiKey = key.trim()
             groqModel = if (model.trim().isNotEmpty()) model.trim() else "qwen/qwen3.8-27b"
             voiceEnabled = voice
+            voiceGender = if (gender.trim().isNotEmpty()) gender.trim().uppercase(Locale.ROOT) else "MALE"
             typewriterSpeedMs = speedMs
             try {
                 val json = JSONObject().apply {
                     put("groq_api_key", groqApiKey)
                     put("groq_model", groqModel)
                     put("voice_enabled", voiceEnabled)
+                    put("voice_gender", voiceGender)
                     put("typewriter_speed_ms", typewriterSpeedMs)
                 }
                 val target = File(PATH_CONFIG)
@@ -523,7 +527,7 @@ object NoticeParser {
     }
 
     object GroqSynthesizer {
-        fun synthesize(contextStr: String, studentName: String): String? {
+        fun synthesize(contextStr: String, studentName: String, nowDateTimeStr: String): String? {
             val key = BriefingConfig.groqApiKey
             if (key.isEmpty()) return null
 
@@ -539,13 +543,17 @@ object NoticeParser {
                 conn.doOutput = true
 
                 val sysPrompt = "You are the executive AI cyberdeck dispatcher for student $studentName (CSE Department, Sylhet Engineering College). " +
-                        "Given the schedule and notice data, synthesize a clean, natural, spoken 2-sentence English briefing. " +
-                        "Prioritize: 1) Class cancellations or room changes today, 2) Next upcoming class/exam, 3) Recent evaluation/marks. " +
-                        "Speak directly, concisely, and naturally. Do not use markdown, emojis, asterisks, bullet points, or filler greetings."
+                        "Current live time is strictly: $nowDateTimeStr. " +
+                        "Synthesize a clean, natural, spoken 2-sentence English briefing. " +
+                        "CRITICAL TEMPORAL RULES: " +
+                        "1. Any class routine, notice, or message from yesterday or earlier is in the PAST. NEVER announce past notices as today's routine or today's classes. " +
+                        "2. If there are no scheduled classes for today, explicitly state that today's schedule is clear. " +
+                        "3. Prioritize: class cancellations today, next upcoming/live class, and recent evaluation score. " +
+                        "Speak directly, concisely, and naturally. No emojis, markdown, asterisks, bullet points, or filler greetings."
 
                 val reqObj = JSONObject().apply {
                     put("model", BriefingConfig.groqModel)
-                    put("temperature", 0.3)
+                    put("temperature", 0.2)
                     put("max_tokens", 100)
                     val msgs = JSONArray().apply {
                         put(JSONObject().apply {
@@ -554,7 +562,7 @@ object NoticeParser {
                         })
                         put(JSONObject().apply {
                             put("role", "user")
-                            put("content", "Current context:\n$contextStr")
+                            put("content", "Current live time: $nowDateTimeStr\nContext Data:\n$contextStr")
                         })
                     }
                     put("messages", msgs)
@@ -595,15 +603,41 @@ object NoticeParser {
         override fun onInit(status: Int) {
             if (status == TextToSpeech.SUCCESS) {
                 isReady = true
-                try {
-                    tts?.language = Locale.US
-                } catch (_: Throwable) {}
+                applyVoiceSettings()
                 val txt = pendingSpeakText
                 if (txt != null) {
                     pendingSpeakText = null
                     speak(txt)
                 }
             }
+        }
+
+        fun applyVoiceSettings() {
+            try {
+                tts?.language = Locale.US
+                val voices = tts?.voices
+                if (voices != null) {
+                    val preferMale = BriefingConfig.voiceGender.equals("MALE", ignoreCase = true)
+                    val selectedVoice = voices.firstOrNull { v ->
+                        val n = v.name.lowercase(Locale.ROOT)
+                        val isEn = v.locale.language.startsWith("en")
+                        if (preferMale) {
+                            isEn && (n.contains("male") || n.contains("#m") || n.contains("-m-") || n.contains("guy") || n.contains("man") || (v.features?.any { it.contains("male", true) } == true))
+                        } else {
+                            isEn && (n.contains("female") || n.contains("#f") || n.contains("-f-") || (v.features?.any { it.contains("female", true) } == true))
+                        }
+                    }
+                    if (selectedVoice != null) {
+                        tts?.voice = selectedVoice
+                    }
+                }
+            } catch (_: Throwable) {}
+
+            try {
+                val isMale = BriefingConfig.voiceGender.equals("MALE", ignoreCase = true)
+                tts?.setPitch(if (isMale) 0.82f else 1.0f)
+                tts?.setSpeechRate(1.05f)
+            } catch (_: Throwable) {}
         }
 
         fun speak(text: String) {
@@ -613,6 +647,7 @@ object NoticeParser {
                 return
             }
             try {
+                applyVoiceSettings()
                 tts?.stop()
                 val utteranceId = "briefing_" + System.currentTimeMillis()
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
@@ -2536,13 +2571,54 @@ object NoticeParser {
                 } catch (_: Throwable) {}
             }
 
-            val contextStr = recentMsgs.joinToString("\n")
+            val nowCal = Calendar.getInstance()
+            val nowFmt = SimpleDateFormat("EEEE, dd MMMM yyyy, hh:mm a", Locale.US).format(nowCal.time)
+
+            val startOfDay = Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, 0)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
+            val endOfDay = startOfDay + 86400_000L - 1
+
+            val allEvents = loadEventsList()
+            val todayEvents = allEvents.filter { it.startMillis in startOfDay..endOfDay }
             val nextEv = getNextUpcomingEvent()
+
+            val eventsSummary = if (todayEvents.isEmpty()) {
+                "No classes or events scheduled for today (schedule is completely clear)."
+            } else {
+                todayEvents.joinToString("; ") { ev ->
+                    val t = SimpleDateFormat("hh:mm a", Locale.US).format(ev.startMillis)
+                    "${ev.type.name} '${ev.title}' (${ev.code}) at $t in ${if (ev.room.isNotEmpty()) ev.room else "TBD"}"
+                }
+            }
+
+            val nextEvSummary = if (nextEv != null) {
+                val t = SimpleDateFormat("EEEE, dd MMM at hh:mm a", Locale.US).format(nextEv.startMillis)
+                "Next upcoming event: '${nextEv.title}' scheduled for $t in ${if (nextEv.room.isNotEmpty()) nextEv.room else "TBD"}"
+            } else {
+                "No upcoming events in schedule database."
+            }
+
+            val noticesSummary = if (recentMsgs.isEmpty()) "No recent channel messages." else recentMsgs.joinToString("\n")
+
+            val contextBuilder = StringBuilder()
+            contextBuilder.append("Current Live Date & Time: $nowFmt\n")
+            contextBuilder.append("Today's Classes & Events: $eventsSummary\n")
+            contextBuilder.append("Upcoming Event Record: $nextEvSummary\n")
+            if (studentRecSummary != null) {
+                contextBuilder.append("Recent Student Evaluation Record: $studentRecSummary\n")
+            }
+            contextBuilder.append("Recent Channel Notices (Check timestamps - past notices are historical):\n$noticesSummary")
+
+            val fullContext = contextBuilder.toString()
 
             var finalScript: String? = null
             var engineUsed = "AI // ${BriefingConfig.groqModel}"
             if (BriefingConfig.groqApiKey.isNotEmpty()) {
-                finalScript = GroqSynthesizer.synthesize(contextStr, studentName)
+                finalScript = GroqSynthesizer.synthesize(fullContext, studentName, nowFmt)
             }
 
             if (finalScript.isNullOrEmpty()) {
@@ -2639,17 +2715,33 @@ object NoticeParser {
         }
         layout.addView(inputModel)
 
+        var selectedGender = BriefingConfig.voiceGender
+        val btnVoiceToggle = Button(ctx).apply {
+            text = "TTS VOICE: $selectedGender (Tap to toggle)"
+            setTextColor(Theme.ACCENT)
+            textSize = 9f
+            typeface = Typeface.MONOSPACE
+            setBackgroundColor(Theme.SURFACE)
+            setPadding(dp(ctx, 8), dp(ctx, 6), dp(ctx, 8), dp(ctx, 6))
+            setOnClickListener {
+                selectedGender = if (selectedGender == "MALE") "FEMALE" else "MALE"
+                text = "TTS VOICE: $selectedGender (Tap to toggle)"
+            }
+        }
+        layout.addView(btnVoiceToggle)
+
         AlertDialog.Builder(ctx)
             .setTitle("Briefing Configuration")
             .setView(layout)
             .setPositiveButton("Save") { _, _ ->
                 val key = inputKey.text.toString().trim()
                 val model = inputModel.text.toString().trim()
-                BriefingConfig.save(key, model, BriefingConfig.voiceEnabled)
-                showToast(ctx, "Briefing config saved.")
+                BriefingConfig.save(key, model, BriefingConfig.voiceEnabled, selectedGender)
+                audioBriefingController?.applyVoiceSettings()
+                showToast(ctx, "Config saved (Voice: $selectedGender).")
             }
             .setNeutralButton(if (BriefingConfig.voiceEnabled) "Voice: ON" else "Voice: OFF") { _, _ ->
-                BriefingConfig.save(inputKey.text.toString().trim(), inputModel.text.toString().trim(), !BriefingConfig.voiceEnabled)
+                BriefingConfig.save(inputKey.text.toString().trim(), inputModel.text.toString().trim(), !BriefingConfig.voiceEnabled, selectedGender)
                 showToast(ctx, "Voice toggled to ${if (BriefingConfig.voiceEnabled) "ON" else "OFF"}")
             }
             .setNegativeButton("Cancel", null)
