@@ -27,22 +27,7 @@ jobs:
           echo "Using D8: $D8"
           echo "Using Android Jar: $ANDROID_JAR"
           
-          # 1. Build CyberSample
-          mkdir -p build/sample-module
-          SAMPLE_CLASSES=$(find app/build -name "*CyberSampleModule*.class")
-          $D8 --lib "$ANDROID_JAR" --output build/sample-module $SAMPLE_CLASSES
-          mv build/sample-module/classes.dex build/sample-module/module.dex
-          cat > build/sample-module/manifest.json << 'EOF'
-          {
-            "id": "cybersample",
-            "title": "CYBER SAMPLE",
-            "entryClass": "com.cyanoge1.sampledex.CyberSampleModule",
-            "dexFile": "module.dex"
-          }
-          EOF
-          cd build/sample-module && zip -r ../../cybersample-dex.zip * && cd ../..
-
-          # 2. Build YtdlpNativeModule
+          # 1. Build YtdlpNativeModule
           mkdir -p build/ytdlp-module
           YTDLP_CLASSES=$(find app/build -name "*YtdlpNativeModule*.class")
           $D8 --lib "$ANDROID_JAR" --output build/ytdlp-module $YTDLP_CLASSES
@@ -57,7 +42,7 @@ jobs:
           EOF
           cd build/ytdlp-module && zip -r ../../ytdlp-dex.zip * && cd ../..
 
-          # 3. Build ScheduleModule
+          # 2. Build ScheduleModule
           mkdir -p build/schedule-module
           SCHEDULE_CLASSES=$(find app/build -type f \( -name "*Schedule*.class" -o -name "*Notice*.class" -o -name "*Theme*.class" -o -name "*Briefing*.class" -o -name "*Groq*.class" -o -name "*Typewriter*.class" \))
           $D8 --lib "$ANDROID_JAR" --output build/schedule-module $SCHEDULE_CLASSES
@@ -72,30 +57,10 @@ jobs:
           EOF
           cd build/schedule-module && zip -r ../../schedule-dex.zip * && cd ../..
 
-          # 4. Build CortexDockModule
-          mkdir -p build/cortex-module
-          CORTEX_CLASSES=$(find app/build -type f \( -name "*Cortex*.class" \))
-          $D8 --lib "$ANDROID_JAR" --output build/cortex-module $CORTEX_CLASSES
-          mv build/cortex-module/classes.dex build/cortex-module/module.dex
-          cat > build/cortex-module/manifest.json << 'EOF'
-          {
-            "id": "cortex",
-            "title": "CORTEX // AI DOCK",
-            "entryClass": "com.cyanoge1.sampledex.CortexDockModule",
-            "dexFile": "module.dex"
-          }
-          EOF
-          cd build/cortex-module && zip -r ../../cortex-dex.zip * && cd ../..
-
       - uses: actions/upload-artifact@v4
         with:
           name: retui-dex-fork-apk
           path: app/build/outputs/apk/fdroid/debug/*.apk
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cybersample-dex
-          path: cybersample-dex.zip
 
       - uses: actions/upload-artifact@v4
         with:
@@ -106,8 +71,3 @@ jobs:
         with:
           name: schedule-dex
           path: schedule-dex.zip
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cortex-dex
-          path: cortex-dex.zip
