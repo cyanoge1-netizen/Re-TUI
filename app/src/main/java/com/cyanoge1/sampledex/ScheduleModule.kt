@@ -738,7 +738,7 @@ object NoticeParser {
         container.visibility = View.VISIBLE
 
         val now = System.currentTimeMillis()
-        val evEnd = if (nextEvent.endMillis > nextEvent.startMillis) nextEvent.endMillis else nextEvent.startMillis + 3600_000L
+        val evEnd = nextEvent.startMillis + (if (nextEvent.type == EventType.LAB || nextEvent.type == EventType.EXAM) 7200_000L else 3600_000L)
         val isOngoing = now in nextEvent.startMillis until evEnd
 
         val typeColor = if (isOngoing) Theme.INFO else Theme.typeColor(nextEvent.type)
@@ -1229,7 +1229,7 @@ object NoticeParser {
 
     private fun renderAgendaCard(ctx: Context, ev: EventItem, isPast: Boolean = false) {
         val nowMillis = System.currentTimeMillis()
-        val evEnd = if (ev.endMillis > ev.startMillis) ev.endMillis else ev.startMillis + 3600_000L
+        val evEnd = ev.startMillis + (if (ev.type == EventType.LAB || ev.type == EventType.EXAM) 7200_000L else 3600_000L)
         val isExpiredToday = !isPast && (nowMillis >= evEnd)
         val isLiveNow = !isPast && !isExpiredToday && (nowMillis in ev.startMillis until evEnd)
         val isMuted = isPast || isExpiredToday
@@ -1968,7 +1968,7 @@ object NoticeParser {
         val now = System.currentTimeMillis()
         val list = loadEventsList()
         val ongoing = list.firstOrNull { ev ->
-            val end = if (ev.endMillis > ev.startMillis) ev.endMillis else ev.startMillis + 3600_000L
+            val end = ev.startMillis + (if (ev.type == EventType.LAB || ev.type == EventType.EXAM) 7200_000L else 3600_000L)
             now in ev.startMillis until end
         }
         if (ongoing != null) return ongoing
