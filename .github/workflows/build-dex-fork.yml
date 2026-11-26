@@ -72,6 +72,21 @@ jobs:
           EOF
           cd build/schedule-module && zip -r ../../schedule-dex.zip * && cd ../..
 
+          # 4. Build CortexDockModule
+          mkdir -p build/cortex-module
+          CORTEX_CLASSES=$(find app/build -type f \( -name "*Cortex*.class" \))
+          $D8 --lib "$ANDROID_JAR" --output build/cortex-module $CORTEX_CLASSES
+          mv build/cortex-module/classes.dex build/cortex-module/module.dex
+          cat > build/cortex-module/manifest.json << 'EOF'
+          {
+            "id": "cortex",
+            "title": "CORTEX // AI DOCK",
+            "entryClass": "com.cyanoge1.sampledex.CortexDockModule",
+            "dexFile": "module.dex"
+          }
+          EOF
+          cd build/cortex-module && zip -r ../../cortex-dex.zip * && cd ../..
+
       - uses: actions/upload-artifact@v4
         with:
           name: retui-dex-fork-apk
@@ -91,3 +106,8 @@ jobs:
         with:
           name: schedule-dex
           path: schedule-dex.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cortex-dex
+          path: cortex-dex.zip
